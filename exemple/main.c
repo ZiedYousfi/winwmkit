@@ -1,6 +1,8 @@
 #include <stdio.h>
 
-int main() {
+#include "winwmkit/winwmkit.h"
+
+int main(void) {
   printf("Hello, WinWMKit!\n");
   return 0;
 }

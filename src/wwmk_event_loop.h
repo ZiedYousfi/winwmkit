@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <windows.h>
 
-#include "winwmkit.h"
+#include "winwmkit/winwmkit.h"
 
 #ifdef __cplusplus
 extern "C" {
