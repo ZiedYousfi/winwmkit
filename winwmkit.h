@@ -8,8 +8,7 @@
 #define WWMK_API
 #endif
 
-#include <stdbool.h>
-#include <windows.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,14 +32,14 @@ typedef struct {
 } WWMK_Rect;
 
 typedef struct {
-  void *handle;
+  uintptr_t id;
   WWMK_Rect rect;
   WWMK_Rect work_rect;
   int is_primary;
 } WWMK_Monitor;
 
 typedef struct {
-  void *handle;
+  uintptr_t id;
   WWMK_Rect rect;
   int is_visible;
   int is_minimized;
@@ -48,7 +47,7 @@ typedef struct {
 } WWMK_Window;
 
 typedef enum {
-  WWMK_EVENT_NONE,
+  WWMK_EVENT_NONE = 0,
   WWMK_EVENT_WINDOW_CREATED,
   WWMK_EVENT_WINDOW_DESTROYED,
   WWMK_EVENT_WINDOW_MOVED,
@@ -59,10 +58,58 @@ typedef enum {
 
 typedef struct {
   WWMK_EventType type;
-  void *window_handle;
-  void *monitor_handle;
+  uintptr_t window_id;
+  uintptr_t monitor_id;
 } WWMK_Event;
 
+typedef void (*WWMK_EventCallback)(const WWMK_Event *event, void *userdata);
+
+WWMK_API int wwmk_set_event_callback(WWMK_EventCallback callback,
+                                     void *userdata);
+WWMK_API int wwmk_start(void);
+WWMK_API int wwmk_stop(void);
+
+WWMK_API int wwmk_on_window_created(WWMK_EventCallback callback,
+                                    void *userdata);
+WWMK_API int wwmk_on_window_destroyed(WWMK_EventCallback callback,
+                                      void *userdata);
+WWMK_API int wwmk_on_window_moved(WWMK_EventCallback callback, void *userdata);
+WWMK_API int wwmk_on_monitor_changed(WWMK_EventCallback callback,
+                                     void *userdata);
+
+WWMK_API int wwmk_get_monitors(WWMK_Monitor *out, int cap);
+WWMK_API int wwmk_get_windows(WWMK_Window *out, int cap);
+
+WWMK_API int wwmk_get_window_rect(WWMK_Window window, WWMK_Rect *out);
+WWMK_API int wwmk_set_window_rect(WWMK_Window window, WWMK_Rect rect);
+WWMK_API int wwmk_move_window(WWMK_Window window, int x, int y);
+WWMK_API int wwmk_resize_window(WWMK_Window window, int width, int height);
+
+WWMK_API int wwmk_window_is_on_monitor(WWMK_Window window,
+                                       WWMK_Monitor monitor);
+WWMK_API WWMK_Monitor wwmk_monitor_from_window(WWMK_Window window);
+WWMK_API int wwmk_rect_intersects(WWMK_Rect a, WWMK_Rect b);
+WWMK_API int wwmk_rect_contains_point(WWMK_Rect rect, WWMK_Point point);
+WWMK_API int wwmk_rect_intersection(WWMK_Rect a, WWMK_Rect b, WWMK_Rect *out);
+WWMK_API int wwmk_rect_intersection_area(WWMK_Rect a, WWMK_Rect b, int *out);
+WWMK_API int wwmk_window_intersects_monitor(WWMK_Window window,
+                                            WWMK_Monitor monitor);
+WWMK_API int wwmk_window_intersection_area_with_monitor(WWMK_Window window,
+                                                        WWMK_Monitor monitor,
+                                                        int *out);
+WWMK_API int wwmk_window_primary_monitor(WWMK_Window window, WWMK_Monitor *out);
+WWMK_API int wwmk_window_monitor_by_center(WWMK_Window window,
+                                           WWMK_Monitor *out);
+WWMK_API int wwmk_rect_visible_region_on_monitors(WWMK_Rect rect,
+                                                  WWMK_Rect *out, int cap);
+WWMK_API int wwmk_rect_is_fully_offscreen(WWMK_Rect rect);
+WWMK_API int wwmk_rect_is_partially_visible(WWMK_Rect rect);
+WWMK_API int wwmk_get_monitor_layout_bounds(WWMK_Rect *out);
+WWMK_API int wwmk_get_uncovered_regions(WWMK_Rect *out, int cap);
+WWMK_API int wwmk_rect_is_visible_on_any_monitor(WWMK_Rect rect);
+WWMK_API int wwmk_get_virtual_space(WWMK_Rect *out);
+WWMK_API WWMK_Point wwmk_rect_center(WWMK_Rect rect);
+
 #ifdef __cplusplus
-} // extern "C"
+}
 #endif
