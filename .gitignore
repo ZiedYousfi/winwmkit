@@ -4,3 +4,5 @@
 *.dll
 *.log
 build/
+compile_commands.json
+exemple/compile_commands.json
