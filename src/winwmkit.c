@@ -63,31 +63,62 @@ int wwmk_get_monitors(WWMK_Monitor *out, int cap) {
   return wwmk_todo_int();
 }
 
+struct EnumWindowsCallbackCtx {
+  HWND hwnd;
+};
+
+struct EnumWindowsCallbackLParam {
+  struct EnumWindowsCallbackCtx *ctxArray;
+  int iteration;
+  int cap;
+  int infinite;
+};
+
 static BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
-  (void)lParam;
-  char title[256];
+  struct EnumWindowsCallbackLParam *ctx =
+      (struct EnumWindowsCallbackLParam *)lParam;
 
-  GetWindowTextA(hwnd, title, sizeof(title));
-
-  printf("HWND: %p | Titre: %s | ", (void *)hwnd, title);
-
-  if (IsIconic(hwnd)) {
-    printf("minimisée");
-  } else if (IsWindowVisible(hwnd)) {
-    printf("visible");
-  } else {
-    printf("cachée/non visible");
+  if (ctx->infinite) {
+    ctx->cap++;
   }
 
-  printf("\n");
+  if (ctx->iteration >= ctx->cap) {
+    return FALSE; // Stop enumeration if we've reached the capacity
+  }
+
+  struct EnumWindowsCallbackCtx windowCtx = {0};
+
+  windowCtx.hwnd = hwnd;
+  ctx->ctxArray[ctx->iteration] = windowCtx;
+  ctx->iteration++;
+
   return TRUE;
 }
 
 int wwmk_get_windows(WWMK_Window *out, int cap) {
   (void)out;
-  (void)cap;
-  EnumWindows(EnumWindowsCallback, 0);
-  return wwmk_todo_int();
+  struct EnumWindowsCallbackLParam result = {0};
+
+  result.ctxArray = calloc(sizeof(struct EnumWindowsCallbackCtx), cap);
+  result.iteration = 0;
+  result.cap = cap;
+
+  if (cap <= 0) {
+    result.infinite = 1;
+  }
+
+  if (!EnumWindows(EnumWindowsCallback, (LPARAM)&result) &&
+      result.iteration < result.cap) {
+    printf("EnumWindows failed with error code: %lu\n", GetLastError());
+    return 1;
+  }
+
+  for (int i = 0; i < result.iteration; i++) {
+    char title[256] = {0};
+    GetWindowTextA(result.ctxArray[i].hwnd, title, sizeof(title) - 1);
+    printf("Found window: %s\n", title);
+  }
+  return 0;
 }
 
 int wwmk_get_window_rect(WWMK_Window window, WWMK_Rect *out) {
