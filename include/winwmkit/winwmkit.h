@@ -44,6 +44,7 @@ typedef struct {
   int is_visible;
   int is_minimized;
   int is_maximized;
+  uint64_t virtual_desktop;
 } WWMK_Window;
 
 typedef enum {
