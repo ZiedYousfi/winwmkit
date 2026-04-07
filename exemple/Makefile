@@ -1,4 +1,4 @@
-SANITIZERS ?=
+SANITIZERS ?=address
 
 ROOT_DIR = ..
 INCLUDE_DIR = $(ROOT_DIR)/include
@@ -12,7 +12,7 @@ EXAMPLE_SOURCES = main.c
 WIN32_LIBS = user32.lib
 
 ifneq ($(strip $(SANITIZERS)),)
-SANITIZER_FLAGS = /fsanitize=$(SANITIZERS)
+SANITIZER_FLAGS = /fsanitize=address /Zi /Od
 endif
 
 CC = cl.exe

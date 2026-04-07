@@ -7,7 +7,7 @@ LIB_BUILD_DIR = $(BUILD_DIR)/lib
 COMPDB = compile_commands.json
 
 ifneq ($(strip $(SANITIZERS)),)
-SANITIZER_FLAGS = /fsanitize=$(SANITIZERS)
+SANITIZER_FLAGS = /fsanitize=address /Zi /Od
 endif
 
 CC = cl.exe
