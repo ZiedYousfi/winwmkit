@@ -1,10 +1,10 @@
 #include "winwmkit/winwmkit.h"
 
+#include <stdio.h>
 #include <stdlib.h>
+#include <windows.h>
 
-static void wwmk_todo_abort(void) {
-  abort();
-}
+static void wwmk_todo_abort(void) { abort(); }
 
 static int wwmk_todo_int(void) {
   wwmk_todo_abort();
@@ -63,9 +63,30 @@ int wwmk_get_monitors(WWMK_Monitor *out, int cap) {
   return wwmk_todo_int();
 }
 
+static BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
+  (void)lParam;
+  char title[256];
+
+  GetWindowTextA(hwnd, title, sizeof(title));
+
+  printf("HWND: %p | Titre: %s | ", (void *)hwnd, title);
+
+  if (IsIconic(hwnd)) {
+    printf("minimisée");
+  } else if (IsWindowVisible(hwnd)) {
+    printf("visible");
+  } else {
+    printf("cachée/non visible");
+  }
+
+  printf("\n");
+  return TRUE;
+}
+
 int wwmk_get_windows(WWMK_Window *out, int cap) {
   (void)out;
   (void)cap;
+  EnumWindows(EnumWindowsCallback, 0);
   return wwmk_todo_int();
 }
 
@@ -139,8 +160,7 @@ int wwmk_window_intersects_monitor(WWMK_Window window, WWMK_Monitor monitor) {
 }
 
 int wwmk_window_intersection_area_with_monitor(WWMK_Window window,
-                                               WWMK_Monitor monitor,
-                                               int *out) {
+                                               WWMK_Monitor monitor, int *out) {
   (void)window;
   (void)monitor;
   (void)out;

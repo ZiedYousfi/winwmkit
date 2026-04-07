@@ -25,6 +25,7 @@ EXAMPLE_OBJ = $(BUILD_DIR)/main.obj
 EXAMPLE_EXE = $(BUILD_DIR)/winwmkit_example.exe
 STATIC_LIB = $(LIB_DIR)/winwmkit.lib
 EXAMPLE_SOURCES = main.c
+WIN32_LIBS = user32.lib
 
 JSON_ESCAPE = $(subst \,\\,$(subst ",\",$(1)))
 JSON_STRING = "$(call JSON_ESCAPE,$(1))"
@@ -58,7 +59,7 @@ $(EXAMPLE_OBJ): main.c | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) /c $< /Fo$@
 
 $(EXAMPLE_EXE): $(EXAMPLE_OBJ) $(STATIC_LIB)
-	$(CC) $(CFLAGS) $(EXAMPLE_OBJ) /Fe$@ /link /LIBPATH:$(LIB_DIR) winwmkit.lib
+	$(CC) $(CFLAGS) $(EXAMPLE_OBJ) /Fe$@ /link /LIBPATH:$(LIB_DIR) winwmkit.lib $(WIN32_LIBS)
 
 clean:
 	if exist "$(BUILD_DIR)" rmdir /S /Q "$(BUILD_DIR)"
