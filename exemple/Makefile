@@ -2,8 +2,8 @@ SANITIZERS ?=address
 
 ROOT_DIR = ..
 INCLUDE_DIR = $(ROOT_DIR)/include
-LIB_DIR = $(ROOT_DIR)/build/msvc/lib
-BUILD_DIR = build/msvc
+LIB_DIR = $(ROOT_DIR)/build/lib
+BUILD_DIR = build
 
 EXAMPLE_OBJ = $(BUILD_DIR)/main.obj
 EXAMPLE_EXE = $(BUILD_DIR)/winwmkit_example.exe
@@ -13,11 +13,12 @@ WIN32_LIBS = user32.lib
 
 ifneq ($(strip $(SANITIZERS)),)
 SANITIZER_FLAGS = /fsanitize=address /Zi /Od
+CRT_FLAGS = /MD
 endif
 
 CC = cl.exe
 CPPFLAGS = /I$(INCLUDE_DIR)
-CFLAGS = /nologo /W4 $(SANITIZER_FLAGS)
+CFLAGS = /nologo /W4 $(CRT_FLAGS) $(SANITIZER_FLAGS)
 
 .PHONY: all compdb clangd clean
 
@@ -38,8 +39,8 @@ $(EXAMPLE_OBJ): main.c | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) /c $< /Fo$@
 
 $(EXAMPLE_EXE): $(EXAMPLE_OBJ) $(STATIC_LIB)
-	$(CC) $(CFLAGS) $(EXAMPLE_OBJ) /Fe$@ /link /LIBPATH:$(LIB_DIR) winwmkit.lib $(WIN32_LIBS)
+	$(CC) $(CFLAGS) $(EXAMPLE_OBJ) /Fe$@ /link $(STATIC_LIB) $(WIN32_LIBS)
 
 clean:
-	if exist "$(BUILD_DIR)" rmdir /S /Q "$(BUILD_DIR)"
+	if exist "build" rmdir /S /Q "build"
 	if exist "$(ROOT_DIR)\compile_commands.json" del /Q "$(ROOT_DIR)\compile_commands.json"

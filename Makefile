@@ -8,12 +8,13 @@ COMPDB = compile_commands.json
 
 ifneq ($(strip $(SANITIZERS)),)
 SANITIZER_FLAGS = /fsanitize=address /Zi /Od
+CRT_FLAGS = /MD
 endif
 
 CC = cl.exe
 AR = lib.exe
 CPPFLAGS = /I$(INCLUDE_DIR)
-CFLAGS = /nologo /W4 $(SANITIZER_FLAGS)
+CFLAGS = /nologo /W4 $(CRT_FLAGS) $(SANITIZER_FLAGS)
 DLLFLAGS = /DWWMK_BUILD_DLL /LD
 
 STATIC_LIB = $(LIB_BUILD_DIR)/winwmkit.lib
