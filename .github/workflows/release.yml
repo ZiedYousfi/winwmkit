@@ -7,11 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Tag to build, for example 1.2.3 or v1.2.3.
-        required: true
+        description: Optional tag to build. Leave empty to build the branch/ref that started the workflow.
+        required: false
+        default: ""
         type: string
       upload_assets:
-        description: Upload the generated zip files to the release for this tag.
+        description: Upload the generated zip files to the release for this tag. Requires `tag`.
         required: false
         default: false
         type: boolean
@@ -29,12 +30,18 @@ jobs:
           - x64
           - x86
     env:
-      RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+      RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag || github.ref_name }}
     steps:
-      - name: Checkout tag
+      - name: Checkout source
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          ref: ${{ github.event.release.tag_name || github.event.inputs.tag || github.ref }}
+
+      - name: Validate manual upload configuration
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.upload_assets == 'true' && github.event.inputs.tag == ''
+        shell: pwsh
+        run: |
+          Write-Error "workflow_dispatch upload_assets=true requires a tag so the assets have a release target."
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -76,7 +83,7 @@ jobs:
           "zip_path=$zipPath" >> $env:GITHUB_OUTPUT
 
       - name: Upload release assets
-        if: github.event_name == 'release' || github.event.inputs.upload_assets == 'true'
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_assets == 'true' && github.event.inputs.tag != '')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
