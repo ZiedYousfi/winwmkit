@@ -1,8 +1,16 @@
+/** @file winwmkit.c
+ *  @brief Public Win32-facing implementation plus the async facade built on the internal worker.
+ */
+
 #include "winwmkit/winwmkit.h"
+#include "wwmk_event_loop.h"
 
 #include <ShObjIdl.h>
+#include <ctype.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <windows.h>
 
 #define WWMK_ALIGNOF(type)                                                     \
@@ -13,20 +21,329 @@
       },                                                                       \
       value)
 
-static void wwmk_todo_abort(void) { abort(); }
-
-static int wwmk_todo_int(void) {
-  wwmk_todo_abort();
-  return 0;
-}
-
 enum {
   WWMK_STATUS_INVALID_ARGUMENT = -1,
   WWMK_STATUS_OUT_OF_MEMORY = -2,
   WWMK_STATUS_ENUM_FAILED = -3,
-  WWMK_STATUS_NOT_FOUND = -4
+  WWMK_STATUS_NOT_FOUND = -4,
+  WWMK_STATUS_ALREADY_RUNNING = -5,
+  WWMK_STATUS_NOT_RUNNING = -6,
+  WWMK_STATUS_THREAD_FAILED = -7
 };
 
+typedef struct {
+  WWMK_EventCallback callback;
+  void *userdata;
+} WWMK_CallbackSlot;
+
+typedef struct {
+  WWMK_ActionCallback callback;
+  void *userdata;
+} WWMK_ActionCallbackSlot;
+
+typedef struct {
+  CRITICAL_SECTION lock;
+  bool loop_initialized;
+  WWMK_EventLoop loop;
+  WWMK_PipeServer *pipe_server;
+  WWMK_CallbackSlot generic_callback;
+  WWMK_CallbackSlot window_created_callback;
+  WWMK_CallbackSlot window_destroyed_callback;
+  WWMK_CallbackSlot window_moved_callback;
+  WWMK_CallbackSlot pipe_message_callback;
+  WWMK_CallbackSlot monitor_changed_callback;
+  WWMK_ActionCallbackSlot action_callback;
+} WWMK_GlobalState;
+
+static INIT_ONCE wwmk_state_once = INIT_ONCE_STATIC_INIT;
+static WWMK_GlobalState wwmk_state = {0};
+
+/** @brief Parses supported pipe commands into public actions when the payload is well formed. */
+static int wwmk_try_parse_pipe_action(char *message, WWMK_Action *out);
+
+/** @brief One-time initialization hook for the global process-local library state. */
+static BOOL CALLBACK wwmk_state_init_once(PINIT_ONCE init_once, PVOID parameter,
+                                          PVOID *context) {
+  (void)init_once;
+  (void)parameter;
+  (void)context;
+
+  InitializeCriticalSection(&wwmk_state.lock);
+  return TRUE;
+}
+
+/** @brief Returns the lazily initialized global state shared by the public API. */
+static WWMK_GlobalState *wwmk_get_global_state(void) {
+  (void)InitOnceExecuteOnce(&wwmk_state_once, wwmk_state_init_once, NULL, NULL);
+  return &wwmk_state;
+}
+
+/** @brief Routes internal worker events to the generic and type-specific public callbacks. */
+static void wwmk_dispatch_internal_event(const WWMK_InternalEvent *event,
+                                         void *userdata) {
+  WWMK_GlobalState *state = (WWMK_GlobalState *)userdata;
+  WWMK_Event public_event = {0};
+  WWMK_CallbackSlot generic_callback = {0};
+  WWMK_CallbackSlot specific_callback = {0};
+
+  if (state == NULL || event == NULL) {
+    return;
+  }
+
+  if (wwmk_event_loop_translate_event(event, &public_event) < 0) {
+    return;
+  }
+
+  EnterCriticalSection(&state->lock);
+  generic_callback = state->generic_callback;
+
+  switch (public_event.type) {
+  case WWMK_EVENT_WINDOW_CREATED:
+    specific_callback = state->window_created_callback;
+    break;
+  case WWMK_EVENT_WINDOW_DESTROYED:
+    specific_callback = state->window_destroyed_callback;
+    break;
+  case WWMK_EVENT_WINDOW_MOVED:
+    specific_callback = state->window_moved_callback;
+    break;
+  case WWMK_EVENT_PIPE_MESSAGE:
+    specific_callback = state->pipe_message_callback;
+    break;
+  case WWMK_EVENT_MONITOR_CHANGED:
+    specific_callback = state->monitor_changed_callback;
+    break;
+  default:
+    break;
+  }
+  LeaveCriticalSection(&state->lock);
+
+  if (generic_callback.callback != NULL) {
+    generic_callback.callback(&public_event, generic_callback.userdata);
+  }
+
+  if (specific_callback.callback != NULL) {
+    specific_callback.callback(&public_event, specific_callback.userdata);
+  }
+}
+
+/** @brief Pipe callback that both republishes the raw message and optionally turns it into an action. */
+static void wwmk_handle_pipe_message(const char *message, size_t size,
+                                     void *userdata) {
+  WWMK_GlobalState *state = (WWMK_GlobalState *)userdata;
+  char buffer[512] = {0};
+  WWMK_Action action = {0};
+  int parsed = 0;
+
+  if (state == NULL || message == NULL) {
+    return;
+  }
+
+  (void)wwmk_event_loop_post_pipe_message(&state->loop, message, size);
+
+  if (size == 0 || size >= sizeof(buffer)) {
+    return;
+  }
+
+  memcpy(buffer, message, size);
+  buffer[size] = '\0';
+  parsed = wwmk_try_parse_pipe_action(buffer, &action);
+  if (parsed == 1) {
+    (void)wwmk_post_action(&action, NULL, NULL);
+  }
+}
+
+/** @brief Trims ASCII whitespace in-place before command parsing. */
+static char *wwmk_trim_ascii(char *text) {
+  char *end = NULL;
+
+  if (text == NULL) {
+    return NULL;
+  }
+
+  while (*text != '\0' && isspace((unsigned char)*text)) {
+    text++;
+  }
+
+  if (*text == '\0') {
+    return text;
+  }
+
+  end = text + strlen(text) - 1;
+  while (end > text && isspace((unsigned char)*end)) {
+    *end = '\0';
+    end--;
+  }
+
+  return text;
+}
+
+/** @brief Parses a pipe token that represents an `HWND` printed with `%p`. */
+static int wwmk_parse_window_handle_token(const char *token, WWMK_Window *out) {
+  unsigned long long value = 0;
+  char *end = NULL;
+
+  if (token == NULL || out == NULL) {
+    return 0;
+  }
+
+  value = strtoull(token, &end, 0);
+  if (end == token || *end != '\0') {
+    return 0;
+  }
+
+  memset(out, 0, sizeof(*out));
+  out->hwnd = (void *)(uintptr_t)value;
+  return out->hwnd != NULL ? 1 : 0;
+}
+
+/** @brief Maps textual pipe commands to the same public actions available through the API. */
+static int wwmk_try_parse_pipe_action(char *message, WWMK_Action *out) {
+  char *command = NULL;
+  char *context = NULL;
+  char *token = NULL;
+  WWMK_Window window = {0};
+  int a = 0;
+  int b = 0;
+  int c = 0;
+  int d = 0;
+
+  if (message == NULL || out == NULL) {
+    return 0;
+  }
+
+  memset(out, 0, sizeof(*out));
+  command = wwmk_trim_ascii(message);
+  if (command == NULL || *command == '\0') {
+    return 0;
+  }
+
+  token = strtok_s(command, " \t\r\n", &context);
+  if (token == NULL) {
+    return 0;
+  }
+
+  if (strcmp(token, "windows") == 0 || strcmp(token, "get_windows") == 0) {
+    out->type = WWMK_ACTION_GET_WINDOWS;
+    return 1;
+  }
+
+  if (strcmp(token, "monitors") == 0 || strcmp(token, "get_monitors") == 0) {
+    out->type = WWMK_ACTION_GET_MONITORS;
+    return 1;
+  }
+
+  if (strcmp(token, "move") == 0) {
+    char *hwnd_token = strtok_s(NULL, " \t\r\n", &context);
+    char *x_token = strtok_s(NULL, " \t\r\n", &context);
+    char *y_token = strtok_s(NULL, " \t\r\n", &context);
+
+    if (!wwmk_parse_window_handle_token(hwnd_token, &window) ||
+        x_token == NULL || y_token == NULL || sscanf_s(x_token, "%d", &a) != 1 ||
+        sscanf_s(y_token, "%d", &b) != 1) {
+      return 0;
+    }
+
+    out->type = WWMK_ACTION_MOVE_WINDOW;
+    out->data.move_window.window = window;
+    out->data.move_window.x = a;
+    out->data.move_window.y = b;
+    return 1;
+  }
+
+  if (strcmp(token, "resize") == 0) {
+    char *hwnd_token = strtok_s(NULL, " \t\r\n", &context);
+    char *width_token = strtok_s(NULL, " \t\r\n", &context);
+    char *height_token = strtok_s(NULL, " \t\r\n", &context);
+
+    if (!wwmk_parse_window_handle_token(hwnd_token, &window) ||
+        width_token == NULL || height_token == NULL ||
+        sscanf_s(width_token, "%d", &a) != 1 ||
+        sscanf_s(height_token, "%d", &b) != 1) {
+      return 0;
+    }
+
+    out->type = WWMK_ACTION_RESIZE_WINDOW;
+    out->data.resize_window.window = window;
+    out->data.resize_window.width = a;
+    out->data.resize_window.height = b;
+    return 1;
+  }
+
+  if (strcmp(token, "set_rect") == 0 || strcmp(token, "set-window-rect") == 0) {
+    char *hwnd_token = strtok_s(NULL, " \t\r\n", &context);
+    char *x_token = strtok_s(NULL, " \t\r\n", &context);
+    char *y_token = strtok_s(NULL, " \t\r\n", &context);
+    char *width_token = strtok_s(NULL, " \t\r\n", &context);
+    char *height_token = strtok_s(NULL, " \t\r\n", &context);
+
+    if (!wwmk_parse_window_handle_token(hwnd_token, &window) ||
+        x_token == NULL || y_token == NULL || width_token == NULL ||
+        height_token == NULL || sscanf_s(x_token, "%d", &a) != 1 ||
+        sscanf_s(y_token, "%d", &b) != 1 ||
+        sscanf_s(width_token, "%d", &c) != 1 ||
+        sscanf_s(height_token, "%d", &d) != 1) {
+      return 0;
+    }
+
+    out->type = WWMK_ACTION_SET_WINDOW_RECT;
+    out->data.set_window_rect.window = window;
+    out->data.set_window_rect.rect = (WWMK_Rect){a, b, c, d};
+    return 1;
+  }
+
+  if (strcmp(token, "get_window_rect") == 0) {
+    char *hwnd_token = strtok_s(NULL, " \t\r\n", &context);
+
+    if (!wwmk_parse_window_handle_token(hwnd_token, &window)) {
+      return 0;
+    }
+
+    out->type = WWMK_ACTION_GET_WINDOW_RECT;
+    out->data.get_window_rect.window = window;
+    return 1;
+  }
+
+  if (strcmp(token, "monitor_from_window") == 0) {
+    char *hwnd_token = strtok_s(NULL, " \t\r\n", &context);
+
+    if (!wwmk_parse_window_handle_token(hwnd_token, &window)) {
+      return 0;
+    }
+
+    out->type = WWMK_ACTION_MONITOR_FROM_WINDOW;
+    out->data.monitor_from_window.window = window;
+    return 1;
+  }
+
+  if (strcmp(token, "window_primary_monitor") == 0) {
+    char *hwnd_token = strtok_s(NULL, " \t\r\n", &context);
+
+    if (!wwmk_parse_window_handle_token(hwnd_token, &window)) {
+      return 0;
+    }
+
+    out->type = WWMK_ACTION_WINDOW_PRIMARY_MONITOR;
+    out->data.window_primary_monitor.window = window;
+    return 1;
+  }
+
+  if (strcmp(token, "window_monitor_by_center") == 0) {
+    char *hwnd_token = strtok_s(NULL, " \t\r\n", &context);
+
+    if (!wwmk_parse_window_handle_token(hwnd_token, &window)) {
+      return 0;
+    }
+
+    out->type = WWMK_ACTION_WINDOW_MONITOR_BY_CENTER;
+    out->data.window_monitor_by_center.window = window;
+    return 1;
+  }
+
+  return 0;
+}
+
+/** @brief Converts a Win32 `RECT` to the public rectangle shape. */
 static WWMK_Rect wwmk_rect_from_win32(const RECT *rect) {
   WWMK_Rect value = {0};
 
@@ -41,6 +358,7 @@ static WWMK_Rect wwmk_rect_from_win32(const RECT *rect) {
   return value;
 }
 
+/** @brief Computes area using a widened type to avoid overflow while choosing monitors. */
 static long long wwmk_rect_area_ll(WWMK_Rect rect) {
   if (rect.width <= 0 || rect.height <= 0) {
     return 0;
@@ -49,6 +367,7 @@ static long long wwmk_rect_area_ll(WWMK_Rect rect) {
   return (long long)rect.width * (long long)rect.height;
 }
 
+/** @brief Fills one public monitor snapshot from an `HMONITOR`. */
 static int wwmk_fill_monitor_from_handle(HMONITOR hmonitor, WWMK_Monitor *out) {
   MONITORINFO info = {0};
 
@@ -75,6 +394,7 @@ struct EnumMonitorsCallbackLParam {
   int status;
 };
 
+/** @brief Internal monitor enumeration callback that grows a temporary array. */
 static BOOL CALLBACK EnumMonitorsCallback(HMONITOR hmonitor, HDC hdc,
                                           LPRECT lprcMonitor, LPARAM lParam) {
   struct EnumMonitorsCallbackLParam *ctx =
@@ -107,6 +427,7 @@ static BOOL CALLBACK EnumMonitorsCallback(HMONITOR hmonitor, HDC hdc,
   return TRUE;
 }
 
+/** @brief Shared monitor enumeration helper used by direct and queued APIs. */
 static int wwmk_collect_monitors(WWMK_Monitor **out, int *count) {
   struct EnumMonitorsCallbackLParam result = {0};
 
@@ -131,40 +452,232 @@ static int wwmk_collect_monitors(WWMK_Monitor **out, int *count) {
 }
 
 int wwmk_set_event_callback(WWMK_EventCallback callback, void *userdata) {
-  (void)callback;
-  (void)userdata;
-  return wwmk_todo_int();
+  WWMK_GlobalState *state = wwmk_get_global_state();
+
+  EnterCriticalSection(&state->lock);
+  state->generic_callback.callback = callback;
+  state->generic_callback.userdata = userdata;
+  LeaveCriticalSection(&state->lock);
+  return 0;
 }
 
-int wwmk_start(void) { return wwmk_todo_int(); }
+int wwmk_set_action_callback(WWMK_ActionCallback callback, void *userdata) {
+  WWMK_GlobalState *state = wwmk_get_global_state();
 
-int wwmk_stop(void) { return wwmk_todo_int(); }
+  EnterCriticalSection(&state->lock);
+  state->action_callback.callback = callback;
+  state->action_callback.userdata = userdata;
+  LeaveCriticalSection(&state->lock);
+  return 0;
+}
+
+int wwmk_start(const WWMK_StartOptions *options) {
+  WWMK_GlobalState *state = wwmk_get_global_state();
+  WWMK_StartOptions default_options = {0};
+  int status = 0;
+
+  if (options == NULL) {
+    options = &default_options;
+  }
+
+  EnterCriticalSection(&state->lock);
+  if (state->loop_initialized) {
+    LeaveCriticalSection(&state->lock);
+    return WWMK_STATUS_ALREADY_RUNNING;
+  }
+  LeaveCriticalSection(&state->lock);
+
+  status =
+      wwmk_event_loop_init(&state->loop, wwmk_dispatch_internal_event, state);
+  if (status < 0) {
+    return status;
+  }
+
+  status = wwmk_event_loop_start(&state->loop);
+  if (status < 0) {
+    wwmk_event_loop_destroy(&state->loop);
+    return status;
+  }
+
+  EnterCriticalSection(&state->lock);
+  state->loop_initialized = true;
+  LeaveCriticalSection(&state->lock);
+
+  if (options->pipe_name != NULL && options->pipe_name[0] != '\0') {
+    WWMK_PipeServer *pipe_server =
+        wwmk_pipe_server_start(options->pipe_name, wwmk_handle_pipe_message,
+                               state);
+    if (pipe_server == NULL) {
+      EnterCriticalSection(&state->lock);
+      state->loop_initialized = false;
+      LeaveCriticalSection(&state->lock);
+      (void)wwmk_event_loop_stop(&state->loop);
+      wwmk_event_loop_destroy(&state->loop);
+      return WWMK_STATUS_THREAD_FAILED;
+    }
+
+    EnterCriticalSection(&state->lock);
+    state->pipe_server = pipe_server;
+    LeaveCriticalSection(&state->lock);
+  }
+
+  return 0;
+}
+
+int wwmk_stop(void) {
+  WWMK_GlobalState *state = wwmk_get_global_state();
+  WWMK_PipeServer *pipe_server = NULL;
+  int loop_initialized = 0;
+
+  EnterCriticalSection(&state->lock);
+  pipe_server = state->pipe_server;
+  state->pipe_server = NULL;
+  loop_initialized = state->loop_initialized ? 1 : 0;
+  state->loop_initialized = false;
+  LeaveCriticalSection(&state->lock);
+
+  if (pipe_server != NULL) {
+    (void)wwmk_pipe_server_stop(pipe_server);
+  }
+
+  if (loop_initialized) {
+    (void)wwmk_event_loop_stop(&state->loop);
+    wwmk_event_loop_destroy(&state->loop);
+  }
+
+  return 0;
+}
 
 int wwmk_on_window_created(WWMK_EventCallback callback, void *userdata) {
-  (void)callback;
-  (void)userdata;
-  return wwmk_todo_int();
+  WWMK_GlobalState *state = wwmk_get_global_state();
+
+  EnterCriticalSection(&state->lock);
+  state->window_created_callback.callback = callback;
+  state->window_created_callback.userdata = userdata;
+  LeaveCriticalSection(&state->lock);
+  return 0;
 }
 
 int wwmk_on_window_destroyed(WWMK_EventCallback callback, void *userdata) {
-  (void)callback;
-  (void)userdata;
-  return wwmk_todo_int();
+  WWMK_GlobalState *state = wwmk_get_global_state();
+
+  EnterCriticalSection(&state->lock);
+  state->window_destroyed_callback.callback = callback;
+  state->window_destroyed_callback.userdata = userdata;
+  LeaveCriticalSection(&state->lock);
+  return 0;
 }
 
 int wwmk_on_window_moved(WWMK_EventCallback callback, void *userdata) {
-  (void)callback;
-  (void)userdata;
-  return wwmk_todo_int();
+  WWMK_GlobalState *state = wwmk_get_global_state();
+
+  EnterCriticalSection(&state->lock);
+  state->window_moved_callback.callback = callback;
+  state->window_moved_callback.userdata = userdata;
+  LeaveCriticalSection(&state->lock);
+  return 0;
+}
+
+int wwmk_on_pipe_message(WWMK_EventCallback callback, void *userdata) {
+  WWMK_GlobalState *state = wwmk_get_global_state();
+
+  EnterCriticalSection(&state->lock);
+  state->pipe_message_callback.callback = callback;
+  state->pipe_message_callback.userdata = userdata;
+  LeaveCriticalSection(&state->lock);
+  return 0;
 }
 
 int wwmk_on_monitor_changed(WWMK_EventCallback callback, void *userdata) {
-  (void)callback;
-  (void)userdata;
-  return wwmk_todo_int();
+  WWMK_GlobalState *state = wwmk_get_global_state();
+
+  EnterCriticalSection(&state->lock);
+  state->monitor_changed_callback.callback = callback;
+  state->monitor_changed_callback.userdata = userdata;
+  LeaveCriticalSection(&state->lock);
+  return 0;
 }
 
-int wwmk_get_monitors(WWMK_Monitor *out, int cap) {
+int wwmk_post_action(const WWMK_Action *action, WWMK_ActionCallback callback,
+                     void *userdata) {
+  WWMK_GlobalState *state = wwmk_get_global_state();
+  WWMK_ActionCallbackSlot default_callback = {0};
+
+  EnterCriticalSection(&state->lock);
+  if (!state->loop_initialized) {
+    LeaveCriticalSection(&state->lock);
+    return WWMK_STATUS_NOT_RUNNING;
+  }
+  default_callback = state->action_callback;
+  LeaveCriticalSection(&state->lock);
+
+  if (callback == NULL) {
+    callback = default_callback.callback;
+    userdata = default_callback.userdata;
+  }
+
+  return wwmk_event_loop_post_action(&state->loop, action, callback, userdata);
+}
+
+/** @brief Uses the default action callback so fire-and-forget public APIs stay concise. */
+static int wwmk_submit_simple_action(const WWMK_Action *action) {
+  return wwmk_post_action(action, NULL, NULL);
+}
+
+int wwmk_request_windows(WWMK_ActionCallback callback, void *userdata) {
+  WWMK_Action action = {0};
+
+  action.type = WWMK_ACTION_GET_WINDOWS;
+  return wwmk_post_action(&action, callback, userdata);
+}
+
+int wwmk_request_monitors(WWMK_ActionCallback callback, void *userdata) {
+  WWMK_Action action = {0};
+
+  action.type = WWMK_ACTION_GET_MONITORS;
+  return wwmk_post_action(&action, callback, userdata);
+}
+
+int wwmk_request_window_rect(WWMK_Window window, WWMK_ActionCallback callback,
+                             void *userdata) {
+  WWMK_Action action = {0};
+
+  action.type = WWMK_ACTION_GET_WINDOW_RECT;
+  action.data.get_window_rect.window = window;
+  return wwmk_post_action(&action, callback, userdata);
+}
+
+int wwmk_request_monitor_from_window(WWMK_Window window,
+                                     WWMK_ActionCallback callback,
+                                     void *userdata) {
+  WWMK_Action action = {0};
+
+  action.type = WWMK_ACTION_MONITOR_FROM_WINDOW;
+  action.data.monitor_from_window.window = window;
+  return wwmk_post_action(&action, callback, userdata);
+}
+
+int wwmk_request_window_primary_monitor(WWMK_Window window,
+                                        WWMK_ActionCallback callback,
+                                        void *userdata) {
+  WWMK_Action action = {0};
+
+  action.type = WWMK_ACTION_WINDOW_PRIMARY_MONITOR;
+  action.data.window_primary_monitor.window = window;
+  return wwmk_post_action(&action, callback, userdata);
+}
+
+int wwmk_request_window_monitor_by_center(WWMK_Window window,
+                                          WWMK_ActionCallback callback,
+                                          void *userdata) {
+  WWMK_Action action = {0};
+
+  action.type = WWMK_ACTION_WINDOW_MONITOR_BY_CENTER;
+  action.data.window_monitor_by_center.window = window;
+  return wwmk_post_action(&action, callback, userdata);
+}
+
+int wwmk_internal_get_monitors_direct(WWMK_Monitor *out, int cap) {
   WWMK_Monitor *monitors = NULL;
   int count = 0;
   int status = 0;
@@ -198,6 +711,7 @@ struct EnumWindowsCallbackLParam {
   IVirtualDesktopManager *virtual_desktop_manager;
 };
 
+/** @brief Internal window enumeration callback that captures live Win32 window state. */
 static BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
   struct EnumWindowsCallbackLParam *ctx =
       (struct EnumWindowsCallbackLParam *)lParam;
@@ -236,7 +750,7 @@ static BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
   window.is_minimized = IsIconic(hwnd) ? 1 : 0;
   window.is_maximized = IsZoomed(hwnd) ? 1 : 0;
   (void)rect;
-  (void)wwmk_get_window_rect(window, &window.rect);
+  (void)wwmk_internal_get_window_rect_direct(window, &window.rect);
 
   if (ctx->virtual_desktop_manager != NULL) {
     GUID desktop_id = {0};
@@ -254,7 +768,7 @@ static BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
   return TRUE;
 }
 
-int wwmk_get_windows(WWMK_Window **out, int cap) {
+int wwmk_internal_get_windows_direct(WWMK_Window **out, int cap) {
   struct EnumWindowsCallbackLParam result = {0};
   char *allocation = NULL;
   WWMK_Window *windows = NULL;
@@ -366,7 +880,7 @@ int wwmk_get_windows(WWMK_Window **out, int cap) {
   return result.count;
 }
 
-int wwmk_get_window_rect(WWMK_Window window, WWMK_Rect *out) {
+int wwmk_internal_get_window_rect_direct(WWMK_Window window, WWMK_Rect *out) {
   RECT rect = {0};
 
   if (window.hwnd == NULL || out == NULL) {
@@ -384,7 +898,7 @@ int wwmk_get_window_rect(WWMK_Window window, WWMK_Rect *out) {
   return 0;
 }
 
-int wwmk_set_window_rect(WWMK_Window window, WWMK_Rect rect) {
+int wwmk_internal_set_window_rect_direct(WWMK_Window window, WWMK_Rect rect) {
   if (window.hwnd == NULL) {
     return -1;
   }
@@ -397,7 +911,7 @@ int wwmk_set_window_rect(WWMK_Window window, WWMK_Rect rect) {
   return 0;
 }
 
-WWMK_Monitor wwmk_monitor_from_window(WWMK_Window window) {
+WWMK_Monitor wwmk_internal_monitor_from_window_direct(WWMK_Window window) {
   HMONITOR monitor = NULL;
   WWMK_Monitor value = {0};
 
@@ -417,7 +931,8 @@ WWMK_Monitor wwmk_monitor_from_window(WWMK_Window window) {
   return value;
 }
 
-int wwmk_window_primary_monitor(WWMK_Window window, WWMK_Monitor *out) {
+int wwmk_internal_window_primary_monitor_direct(WWMK_Window window,
+                                                WWMK_Monitor *out) {
   WWMK_Monitor *monitors = NULL;
   WWMK_Rect window_rect = window.rect;
   WWMK_Monitor fallback_monitor = {0};
@@ -434,7 +949,7 @@ int wwmk_window_primary_monitor(WWMK_Window window, WWMK_Monitor *out) {
   *out = (WWMK_Monitor){0};
 
   if (window.hwnd != NULL) {
-    (void)wwmk_get_window_rect(window, &window_rect);
+    (void)wwmk_internal_get_window_rect_direct(window, &window_rect);
   }
 
   status = wwmk_collect_monitors(&monitors, &count);
@@ -466,7 +981,7 @@ int wwmk_window_primary_monitor(WWMK_Window window, WWMK_Monitor *out) {
   }
 
   if (window.hwnd != NULL) {
-    fallback_monitor = wwmk_monitor_from_window(window);
+    fallback_monitor = wwmk_internal_monitor_from_window_direct(window);
     if (fallback_monitor.id != 0) {
       *out = fallback_monitor;
       free(monitors);
@@ -478,7 +993,8 @@ int wwmk_window_primary_monitor(WWMK_Window window, WWMK_Monitor *out) {
   return WWMK_STATUS_NOT_FOUND;
 }
 
-int wwmk_window_monitor_by_center(WWMK_Window window, WWMK_Monitor *out) {
+int wwmk_internal_window_monitor_by_center_direct(WWMK_Window window,
+                                                  WWMK_Monitor *out) {
   WWMK_Rect window_rect = window.rect;
   WWMK_Point center = {0};
   POINT win32_center = {0};
@@ -491,7 +1007,7 @@ int wwmk_window_monitor_by_center(WWMK_Window window, WWMK_Monitor *out) {
   *out = (WWMK_Monitor){0};
 
   if (window.hwnd != NULL) {
-    (void)wwmk_get_window_rect(window, &window_rect);
+    (void)wwmk_internal_get_window_rect_direct(window, &window_rect);
   }
 
   center = wwmk_rect_center(window_rect);
@@ -504,6 +1020,59 @@ int wwmk_window_monitor_by_center(WWMK_Window window, WWMK_Monitor *out) {
   }
 
   return wwmk_fill_monitor_from_handle(monitor, out);
+}
+
+int wwmk_get_monitors(WWMK_Monitor *out, int cap) {
+  return wwmk_internal_get_monitors_direct(out, cap);
+}
+
+int wwmk_get_windows(WWMK_Window **out, int cap) {
+  return wwmk_internal_get_windows_direct(out, cap);
+}
+
+int wwmk_get_window_rect(WWMK_Window window, WWMK_Rect *out) {
+  return wwmk_internal_get_window_rect_direct(window, out);
+}
+
+int wwmk_set_window_rect(WWMK_Window window, WWMK_Rect rect) {
+  WWMK_Action action = {0};
+
+  action.type = WWMK_ACTION_SET_WINDOW_RECT;
+  action.data.set_window_rect.window = window;
+  action.data.set_window_rect.rect = rect;
+  return wwmk_submit_simple_action(&action);
+}
+
+int wwmk_move_window(WWMK_Window window, int x, int y) {
+  WWMK_Action action = {0};
+
+  action.type = WWMK_ACTION_MOVE_WINDOW;
+  action.data.move_window.window = window;
+  action.data.move_window.x = x;
+  action.data.move_window.y = y;
+  return wwmk_submit_simple_action(&action);
+}
+
+int wwmk_resize_window(WWMK_Window window, int width, int height) {
+  WWMK_Action action = {0};
+
+  action.type = WWMK_ACTION_RESIZE_WINDOW;
+  action.data.resize_window.window = window;
+  action.data.resize_window.width = width;
+  action.data.resize_window.height = height;
+  return wwmk_submit_simple_action(&action);
+}
+
+WWMK_Monitor wwmk_monitor_from_window(WWMK_Window window) {
+  return wwmk_internal_monitor_from_window_direct(window);
+}
+
+int wwmk_window_primary_monitor(WWMK_Window window, WWMK_Monitor *out) {
+  return wwmk_internal_window_primary_monitor_direct(window, out);
+}
+
+int wwmk_window_monitor_by_center(WWMK_Window window, WWMK_Monitor *out) {
+  return wwmk_internal_window_monitor_by_center_direct(window, out);
 }
 
 int wwmk_rect_visible_region_on_monitors(WWMK_Rect rect, WWMK_Rect *out,

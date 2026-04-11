@@ -1,3 +1,7 @@
+/** @file wwmk_pipe.c
+ *  @brief Internal named-pipe intake that feeds messages into the event loop.
+ */
+
 #include "winwmkit/winwmkit.h"
 
 #include <stdlib.h>
@@ -21,6 +25,7 @@ struct WWMK_PipeServer {
   char full_name[256];
 };
 
+/** @brief Normalizes a short pipe name into a full `\\.\pipe\...` path. */
 static int wwmk_pipe_build_full_name(const char *pipe_name, char *out,
                                      size_t out_size) {
   static const char prefix[] = "\\\\.\\pipe\\";
@@ -54,6 +59,7 @@ static int wwmk_pipe_build_full_name(const char *pipe_name, char *out,
   return 0;
 }
 
+/** @brief Grows the temporary message buffer used while reconstructing one pipe message. */
 static int wwmk_pipe_buffer_reserve(char **buffer, size_t *capacity,
                                     size_t needed) {
   char *grown = NULL;
@@ -86,6 +92,7 @@ static int wwmk_pipe_buffer_reserve(char **buffer, size_t *capacity,
   return 0;
 }
 
+/** @brief Appends one chunk from `ReadFile` and keeps the buffer NUL-terminated for logging/debugging. */
 static int wwmk_pipe_append_chunk(char **message, size_t *message_size,
                                   size_t *message_capacity,
                                   const char *chunk, DWORD chunk_size) {
@@ -113,6 +120,7 @@ static int wwmk_pipe_append_chunk(char **message, size_t *message_size,
   return 0;
 }
 
+/** @brief Delivers one reconstructed message to the callback owned by `winwmkit.c`. */
 static void wwmk_pipe_dispatch_message(WWMK_PipeServer *server, char *message,
                                        size_t message_size) {
   if (server == NULL || server->callback == NULL) {
@@ -122,6 +130,7 @@ static void wwmk_pipe_dispatch_message(WWMK_PipeServer *server, char *message,
   server->callback(message, message_size, server->userdata);
 }
 
+/** @brief Reads one client connection until disconnect while preserving message boundaries. */
 static int wwmk_pipe_read_messages(WWMK_PipeServer *server, HANDLE pipe) {
   char chunk[1024];
   char *message = NULL;
@@ -177,6 +186,7 @@ static int wwmk_pipe_read_messages(WWMK_PipeServer *server, HANDLE pipe) {
   return status;
 }
 
+/** @brief Pipe thread that accepts connections and forwards each complete message. */
 static DWORD WINAPI wwmk_pipe_server_thread_main(LPVOID arg) {
   WWMK_PipeServer *server = (WWMK_PipeServer *)arg;
 
@@ -221,6 +231,7 @@ static DWORD WINAPI wwmk_pipe_server_thread_main(LPVOID arg) {
   return 0;
 }
 
+/** @brief Starts the internal pipe server used by `wwmk_start()`. */
 WWMK_PipeServer *wwmk_pipe_server_start(const char *pipe_name,
                                         WWMK_PipeMessageCallback callback,
                                         void *userdata) {
@@ -262,6 +273,7 @@ WWMK_PipeServer *wwmk_pipe_server_start(const char *pipe_name,
   return server;
 }
 
+/** @brief Stops the pipe thread and releases its handles. */
 int wwmk_pipe_server_stop(WWMK_PipeServer *server) {
   DWORD wait_result = WAIT_OBJECT_0;
 

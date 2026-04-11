@@ -1,9 +1,16 @@
+/** @file geometry_helpers.c
+ *  @brief Pure geometry helpers that stay synchronous and never touch Win32.
+ */
+
 #include "winwmkit/winwmkit.h"
 
+/** @brief Returns the exclusive right edge of a rectangle. */
 static int wwmk_rect_right(WWMK_Rect rect) { return rect.x + rect.width; }
 
+/** @brief Returns the exclusive bottom edge of a rectangle. */
 static int wwmk_rect_bottom(WWMK_Rect rect) { return rect.y + rect.height; }
 
+/** @brief Shared intersection primitive used by the exported geometry helpers. */
 static int wwmk_rect_intersection_internal(WWMK_Rect a, WWMK_Rect b,
                                            WWMK_Rect *out) {
   int left = a.x > b.x ? a.x : b.x;

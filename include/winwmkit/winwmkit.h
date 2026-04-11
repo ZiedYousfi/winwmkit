@@ -94,6 +94,8 @@ typedef enum {
   WWMK_EVENT_WINDOW_RESIZED,
   /** A window gained focus. */
   WWMK_EVENT_WINDOW_FOCUSED,
+  /** A pipe message was received. */
+  WWMK_EVENT_PIPE_MESSAGE,
   /** Monitor configuration changed. */
   WWMK_EVENT_MONITOR_CHANGED
 } WWMK_EventType;
@@ -106,6 +108,10 @@ typedef struct {
   uintptr_t window_id;
   /** Monitor identifier when the event targets a monitor. */
   uintptr_t monitor_id;
+  /** Pipe message bytes when `type == WWMK_EVENT_PIPE_MESSAGE`. */
+  const char *message;
+  /** Pipe message size when `type == WWMK_EVENT_PIPE_MESSAGE`. */
+  size_t message_size;
 } WWMK_Event;
 
 /** @brief Callback signature for event notifications. */
@@ -118,27 +124,156 @@ typedef struct WWMK_PipeServer WWMK_PipeServer;
 typedef void (*WWMK_PipeMessageCallback)(const char *message, size_t size,
                                          void *userdata);
 
+/** @brief Action kinds processed by the background event loop. */
+typedef enum {
+  /** No action. */
+  WWMK_ACTION_NONE = 0,
+  /** Enumerate top-level windows. */
+  WWMK_ACTION_GET_WINDOWS,
+  /** Enumerate connected monitors. */
+  WWMK_ACTION_GET_MONITORS,
+  /** Read the current rectangle of a window. */
+  WWMK_ACTION_GET_WINDOW_RECT,
+  /** Set the full rectangle of a window. */
+  WWMK_ACTION_SET_WINDOW_RECT,
+  /** Move a window while preserving its size. */
+  WWMK_ACTION_MOVE_WINDOW,
+  /** Resize a window while preserving its position. */
+  WWMK_ACTION_RESIZE_WINDOW,
+  /** Resolve the nearest monitor for a window. */
+  WWMK_ACTION_MONITOR_FROM_WINDOW,
+  /** Resolve the primary monitor for a window. */
+  WWMK_ACTION_WINDOW_PRIMARY_MONITOR,
+  /** Resolve the monitor containing the window center. */
+  WWMK_ACTION_WINDOW_MONITOR_BY_CENTER
+} WWMK_ActionType;
+
+/** @brief Action payload submitted to the event loop. */
+typedef struct {
+  /** Action kind. */
+  WWMK_ActionType type;
+  union {
+    /** Payload for `WWMK_ACTION_GET_WINDOW_RECT`. */
+    struct {
+      /** Target window. */
+      WWMK_Window window;
+    } get_window_rect;
+    /** Payload for `WWMK_ACTION_SET_WINDOW_RECT`. */
+    struct {
+      /** Target window. */
+      WWMK_Window window;
+      /** Requested rectangle. */
+      WWMK_Rect rect;
+    } set_window_rect;
+    /** Payload for `WWMK_ACTION_MOVE_WINDOW`. */
+    struct {
+      /** Target window. */
+      WWMK_Window window;
+      /** Target X position. */
+      int x;
+      /** Target Y position. */
+      int y;
+    } move_window;
+    /** Payload for `WWMK_ACTION_RESIZE_WINDOW`. */
+    struct {
+      /** Target window. */
+      WWMK_Window window;
+      /** Target width. */
+      int width;
+      /** Target height. */
+      int height;
+    } resize_window;
+    /** Payload for `WWMK_ACTION_MONITOR_FROM_WINDOW`. */
+    struct {
+      /** Target window. */
+      WWMK_Window window;
+    } monitor_from_window;
+    /** Payload for `WWMK_ACTION_WINDOW_PRIMARY_MONITOR`. */
+    struct {
+      /** Target window. */
+      WWMK_Window window;
+    } window_primary_monitor;
+    /** Payload for `WWMK_ACTION_WINDOW_MONITOR_BY_CENTER`. */
+    struct {
+      /** Target window. */
+      WWMK_Window window;
+    } window_monitor_by_center;
+  } data;
+} WWMK_Action;
+
+/** @brief Result delivered after an action is processed. */
+typedef struct {
+  /** Completed action kind. */
+  WWMK_ActionType type;
+  /** `0` on success, or a negative error code. */
+  int status;
+  union {
+    /** Result payload for `WWMK_ACTION_GET_WINDOWS`. */
+    struct {
+      /** Window list valid for the duration of the callback only. */
+      WWMK_Window *items;
+      /** Number of entries in @p items. */
+      int count;
+    } windows;
+    /** Result payload for `WWMK_ACTION_GET_MONITORS`. */
+    struct {
+      /** Monitor list valid for the duration of the callback only. */
+      WWMK_Monitor *items;
+      /** Number of entries in @p items. */
+      int count;
+    } monitors;
+    /** Result payload for rectangle-returning actions. */
+    struct {
+      /** Rectangle returned by the action. */
+      WWMK_Rect rect;
+    } rect;
+    /** Result payload for monitor-returning actions. */
+    struct {
+      /** Monitor returned by the action. */
+      WWMK_Monitor monitor;
+    } monitor;
+  } data;
+} WWMK_ActionResult;
+
+/** @brief Callback signature for completed actions. */
+typedef void (*WWMK_ActionCallback)(const WWMK_ActionResult *result,
+                                    void *userdata);
+
+/** @brief Start-time configuration for the event loop and optional pipe. */
+typedef struct {
+  /** Optional pipe name. Pass `NULL` to disable pipe intake. */
+  const char *pipe_name;
+} WWMK_StartOptions;
+
 /**
  * @brief Registers a generic event callback.
  * @param callback Callback invoked for emitted events.
  * @param userdata Opaque user pointer passed back to @p callback.
- * @return Status code from the event backend.
- * @note Event backend support is not implemented yet.
+ * @return `0` on success, or a negative error code.
+ * @note Pipe message buffers are valid only during the callback invocation.
  */
 WWMK_API int wwmk_set_event_callback(WWMK_EventCallback callback,
                                      void *userdata);
 
 /**
- * @brief Starts the event backend.
- * @return Status code from the event backend.
- * @note Event backend support is not implemented yet.
+ * @brief Registers the default callback used by queued actions.
+ * @param callback Callback invoked when a queued action completes.
+ * @param userdata Opaque user pointer passed back to @p callback.
+ * @return `0` on success, or a negative error code.
  */
-WWMK_API int wwmk_start(void);
+WWMK_API int wwmk_set_action_callback(WWMK_ActionCallback callback,
+                                      void *userdata);
 
 /**
- * @brief Stops the event backend.
- * @return Status code from the event backend.
- * @note Event backend support is not implemented yet.
+ * @brief Starts the background event loop and optional pipe intake.
+ * @param options Optional startup configuration. Pass `NULL` for defaults.
+ * @return `0` on success, or a negative error code.
+ */
+WWMK_API int wwmk_start(const WWMK_StartOptions *options);
+
+/**
+ * @brief Stops the background event loop and optional pipe intake.
+ * @return `0` on success, or a negative error code.
  */
 WWMK_API int wwmk_stop(void);
 
@@ -146,8 +281,7 @@ WWMK_API int wwmk_stop(void);
  * @brief Registers a callback for window creation events.
  * @param callback Callback invoked when a window is created.
  * @param userdata Opaque user pointer passed back to @p callback.
- * @return Status code from the event backend.
- * @note Event backend support is not implemented yet.
+ * @return `0` on success, or a negative error code.
  */
 WWMK_API int wwmk_on_window_created(WWMK_EventCallback callback,
                                     void *userdata);
@@ -156,8 +290,7 @@ WWMK_API int wwmk_on_window_created(WWMK_EventCallback callback,
  * @brief Registers a callback for window destruction events.
  * @param callback Callback invoked when a window is destroyed.
  * @param userdata Opaque user pointer passed back to @p callback.
- * @return Status code from the event backend.
- * @note Event backend support is not implemented yet.
+ * @return `0` on success, or a negative error code.
  */
 WWMK_API int wwmk_on_window_destroyed(WWMK_EventCallback callback,
                                       void *userdata);
@@ -166,20 +299,101 @@ WWMK_API int wwmk_on_window_destroyed(WWMK_EventCallback callback,
  * @brief Registers a callback for window move events.
  * @param callback Callback invoked when a window moves.
  * @param userdata Opaque user pointer passed back to @p callback.
- * @return Status code from the event backend.
- * @note Event backend support is not implemented yet.
+ * @return `0` on success, or a negative error code.
  */
 WWMK_API int wwmk_on_window_moved(WWMK_EventCallback callback, void *userdata);
+
+/**
+ * @brief Registers a callback for pipe message events.
+ * @param callback Callback invoked when a pipe message is received.
+ * @param userdata Opaque user pointer passed back to @p callback.
+ * @return `0` on success, or a negative error code.
+ */
+WWMK_API int wwmk_on_pipe_message(WWMK_EventCallback callback, void *userdata);
 
 /**
  * @brief Registers a callback for monitor layout change events.
  * @param callback Callback invoked when monitor state changes.
  * @param userdata Opaque user pointer passed back to @p callback.
- * @return Status code from the event backend.
- * @note Event backend support is not implemented yet.
+ * @return `0` on success, or a negative error code.
  */
 WWMK_API int wwmk_on_monitor_changed(WWMK_EventCallback callback,
                                      void *userdata);
+
+/**
+ * @brief Requests an asynchronous window enumeration through the event loop.
+ * @param callback Callback invoked when the action completes.
+ * @param userdata Opaque user pointer passed back to @p callback.
+ * @return `0` on success, or a negative error code.
+ */
+WWMK_API int wwmk_request_windows(WWMK_ActionCallback callback,
+                                  void *userdata);
+
+/**
+ * @brief Requests an asynchronous monitor enumeration through the event loop.
+ * @param callback Callback invoked when the action completes.
+ * @param userdata Opaque user pointer passed back to @p callback.
+ * @return `0` on success, or a negative error code.
+ */
+WWMK_API int wwmk_request_monitors(WWMK_ActionCallback callback,
+                                   void *userdata);
+
+/**
+ * @brief Requests an asynchronous window-rectangle read through the event loop.
+ * @param window Target window.
+ * @param callback Callback invoked when the action completes.
+ * @param userdata Opaque user pointer passed back to @p callback.
+ * @return `0` on success, or a negative error code.
+ */
+WWMK_API int wwmk_request_window_rect(WWMK_Window window,
+                                      WWMK_ActionCallback callback,
+                                      void *userdata);
+
+/**
+ * @brief Requests an asynchronous monitor lookup for a window.
+ * @param window Target window.
+ * @param callback Callback invoked when the action completes.
+ * @param userdata Opaque user pointer passed back to @p callback.
+ * @return `0` on success, or a negative error code.
+ */
+WWMK_API int wwmk_request_monitor_from_window(WWMK_Window window,
+                                              WWMK_ActionCallback callback,
+                                              void *userdata);
+
+/**
+ * @brief Requests the primary monitor for a window through the event loop.
+ * @param window Target window.
+ * @param callback Callback invoked when the action completes.
+ * @param userdata Opaque user pointer passed back to @p callback.
+ * @return `0` on success, or a negative error code.
+ */
+WWMK_API int wwmk_request_window_primary_monitor(WWMK_Window window,
+                                                 WWMK_ActionCallback callback,
+                                                 void *userdata);
+
+/**
+ * @brief Requests the center-point monitor for a window through the event loop.
+ * @param window Target window.
+ * @param callback Callback invoked when the action completes.
+ * @param userdata Opaque user pointer passed back to @p callback.
+ * @return `0` on success, or a negative error code.
+ */
+WWMK_API int wwmk_request_window_monitor_by_center(WWMK_Window window,
+                                                   WWMK_ActionCallback callback,
+                                                   void *userdata);
+
+/**
+ * @brief Posts an action to the background event loop.
+ * @param action Action to enqueue.
+ * @param callback Optional callback invoked when the action completes.
+ * @param userdata Opaque user pointer passed back to @p callback.
+ * @return `0` on success, or a negative error code.
+ * @note The event loop must be started with `wwmk_start()` first.
+ * @note Array payloads inside `WWMK_ActionResult` are valid only during the
+ * callback invocation.
+ */
+WWMK_API int wwmk_post_action(const WWMK_Action *action,
+                              WWMK_ActionCallback callback, void *userdata);
 
 /**
  * @brief Starts a background named-pipe server.
@@ -233,9 +447,28 @@ WWMK_API int wwmk_get_window_rect(WWMK_Window window, WWMK_Rect *out);
  * @brief Moves and resizes a window.
  * @param window Window snapshot or handle wrapper.
  * @param rect Target rectangle.
- * @return `0` on success, or a negative error code.
+ * @return `0` when the action was queued, or a negative error code.
+ * @note The actual Windows call happens asynchronously on the event loop.
  */
 WWMK_API int wwmk_set_window_rect(WWMK_Window window, WWMK_Rect rect);
+
+/**
+ * @brief Requests an asynchronous window move while preserving its size.
+ * @param window Window snapshot or handle wrapper.
+ * @param x Target X position.
+ * @param y Target Y position.
+ * @return `0` when the action was queued, or a negative error code.
+ */
+WWMK_API int wwmk_move_window(WWMK_Window window, int x, int y);
+
+/**
+ * @brief Requests an asynchronous window resize while preserving its position.
+ * @param window Window snapshot or handle wrapper.
+ * @param width Target width.
+ * @param height Target height.
+ * @return `0` when the action was queued, or a negative error code.
+ */
+WWMK_API int wwmk_resize_window(WWMK_Window window, int width, int height);
 
 /**
  * @brief Tests whether a window rectangle intersects a monitor rectangle.

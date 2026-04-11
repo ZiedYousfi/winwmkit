@@ -1,6 +1,11 @@
+/** @file wwmk_event_loop.h
+ *  @brief Internal event-loop and queue contracts used by the Win32 backend.
+ */
+
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <windows.h>
 
@@ -10,264 +15,127 @@
 extern "C" {
 #endif
 
-/*
- * Interne uniquement.
- *
- * Ce header ne fait PAS partie de l'API publique.
- * Il sert à piloter la boucle d'événements interne de la librairie :
- * - thread de fond
- * - queue MPSC
- * - réception / normalisation des événements Windows
- * - dispatch vers les callbacks publics
- *
- * Idée générale :
- * - plusieurs producteurs peuvent push des événements dans la queue
- * - un seul consommateur lit la queue et appelle les callbacks
- * - start() initialise tout
- * - stop() arrête proprement tout et libère les ressources
- */
-
 typedef enum {
   WWMK_INTERNAL_EVENT_NONE = 0,
-
   WWMK_INTERNAL_EVENT_WINDOW_CREATED,
   WWMK_INTERNAL_EVENT_WINDOW_DESTROYED,
   WWMK_INTERNAL_EVENT_WINDOW_MOVED,
   WWMK_INTERNAL_EVENT_WINDOW_RESIZED,
   WWMK_INTERNAL_EVENT_WINDOW_FOCUSED,
-
+  WWMK_INTERNAL_EVENT_PIPE_MESSAGE,
   WWMK_INTERNAL_EVENT_MONITOR_ADDED,
   WWMK_INTERNAL_EVENT_MONITOR_REMOVED,
-  WWMK_INTERNAL_EVENT_MONITOR_UPDATED,
-
-  WWMK_INTERNAL_EVENT_QUIT
+  WWMK_INTERNAL_EVENT_MONITOR_UPDATED
 } WWMK_InternalEventType;
 
+/** @brief Internal event format before translation to the public API. */
 typedef struct {
   WWMK_InternalEventType type;
-
   uintptr_t window_id;
   uintptr_t monitor_id;
-
-  /*
-   * Optionnel selon l'événement.
-   * Utile pour éviter de re-query immédiatement dans certains cas.
-   */
   WWMK_Rect rect;
+  const char *message;
+  size_t message_size;
 } WWMK_InternalEvent;
 
-/*
- * Callback interne de dispatch.
- *
- * En pratique, cette callback fera le pont entre l'événement interne
- * et la callback publique enregistrée par l'utilisateur.
- */
+/** @brief Bridge from the worker to the public event dispatcher. */
 typedef void (*WWMK_InternalEventCallback)(const WWMK_InternalEvent *event,
                                            void *userdata);
 
-/*
- * Queue MPSC simple :
- * - plusieurs producteurs
- * - un seul consommateur
- *
- * NOTE IMPL:
- * Tu peux commencer avec une queue protégée par CRITICAL_SECTION
- * + CONDITION_VARIABLE ou semaphore.
- * Pas besoin de lock-free tout de suite.
- */
+typedef enum {
+  WWMK_QUEUE_ITEM_NONE = 0,
+  WWMK_QUEUE_ITEM_ACTION,
+  WWMK_QUEUE_ITEM_PIPE_MESSAGE,
+  WWMK_QUEUE_ITEM_QUIT
+} WWMK_QueueItemType;
+
+typedef struct WWMK_QueueItem WWMK_QueueItem;
+
+/** @brief Linked-list node used by the MPSC action and pipe queue. */
+struct WWMK_QueueItem {
+  WWMK_QueueItemType type;
+  WWMK_Action action;
+  WWMK_ActionCallback action_callback;
+  void *action_userdata;
+  char *message;
+  size_t message_size;
+  WWMK_QueueItem *next;
+};
+
+/** @brief Single-consumer queue protected by a critical section and condition variable. */
 typedef struct {
-  WWMK_InternalEvent *events;
-  size_t capacity;
-
-  size_t head;
-  size_t tail;
-
+  WWMK_QueueItem *head;
+  WWMK_QueueItem *tail;
   CRITICAL_SECTION lock;
   CONDITION_VARIABLE cv;
-
   bool closed;
 } WWMK_EventQueue;
 
-/*
- * Etat interne de la boucle d'événements.
- *
- * NOTE IMPL:
- * - worker_thread = thread qui attend les signaux / hooks / messages Windows
- * - running = vrai tant que la boucle doit continuer
- * - stop_requested = permet une sortie propre
- * - callback/userdata = cible finale du dispatch
- */
+/** @brief Internal worker state for the asynchronous Win32 interaction layer. */
 typedef struct {
   HANDLE worker_thread;
   DWORD worker_thread_id;
-
+  CRITICAL_SECTION state_lock;
   bool running;
   bool stop_requested;
-
   WWMK_EventQueue queue;
-
   WWMK_InternalEventCallback callback;
   void *callback_userdata;
-
-  /*
-   * NOTE IMPL:
-   * Si tu utilises WinEvent hooks, stocke-les ici.
-   * Exemple possible plus tard :
-   * HWINEVENTHOOK window_hook;
-   * HWINEVENTHOOK focus_hook;
-   * etc.
-   */
 } WWMK_EventLoop;
 
-/*
- * Initialise la queue.
- *
- * NOTE IMPL:
- * - allouer le buffer
- * - capacity > 0 obligatoire
- * - head/tail à 0
- * - init CRITICAL_SECTION + CONDITION_VARIABLE
- */
-int wwmk_event_queue_init(WWMK_EventQueue *queue, size_t capacity);
-
-/*
- * Détruit la queue.
- *
- * NOTE IMPL:
- * - libérer le buffer
- * - marquer closed = true
- * - réveiller les éventuels waiters avant destruction si nécessaire
- */
+/** @brief Initializes the internal queue backing the event loop. */
+int wwmk_event_queue_init(WWMK_EventQueue *queue);
+/** @brief Releases queue nodes left after the worker shuts down. */
 void wwmk_event_queue_destroy(WWMK_EventQueue *queue);
-
-/*
- * Push par un producteur.
- *
- * Retourne 1 si succès, 0 sinon.
- *
- * NOTE IMPL:
- * - refuser si queue fermée
- * - selon ton choix : soit refuser si pleine, soit overwrite, soit grow
- * - au début, "refuser si pleine" est largement suffisant
- */
-int wwmk_event_queue_push(WWMK_EventQueue *queue,
-                          const WWMK_InternalEvent *event);
-
-/*
- * Pop bloquant pour le consommateur unique.
- *
- * Retourne :
- * - 1 si un événement a été lu
- * - 0 si arrêt / fermeture
- *
- * NOTE IMPL:
- * - attendre sur CONDITION_VARIABLE tant que la queue est vide
- * - sortir si closed == true et plus rien à lire
- */
-int wwmk_event_queue_pop_wait(WWMK_EventQueue *queue, WWMK_InternalEvent *out);
-
-/*
- * Pop non bloquant, si jamais tu veux l'utiliser en interne.
- *
- * Retourne 1 si succès, 0 sinon.
- */
-int wwmk_event_queue_pop_nowait(WWMK_EventQueue *queue,
-                                WWMK_InternalEvent *out);
-
-/*
- * Ferme la queue et réveille le consommateur.
- *
- * NOTE IMPL:
- * - closed = true
- * - WakeAllConditionVariable(&queue->cv)
- */
+/** @brief Pushes an action or pipe message into the internal MPSC queue. */
+int wwmk_event_queue_push(WWMK_EventQueue *queue, WWMK_QueueItem *item);
+/** @brief Waits for the next queue item on the worker thread. */
+int wwmk_event_queue_pop_wait(WWMK_EventQueue *queue, WWMK_QueueItem **out);
+/** @brief Attempts a non-blocking pop; used only by internal helpers. */
+int wwmk_event_queue_pop_nowait(WWMK_EventQueue *queue, WWMK_QueueItem **out);
+/** @brief Marks the queue closed and wakes the worker so stop can complete. */
 void wwmk_event_queue_close(WWMK_EventQueue *queue);
 
-/*
- * Initialise l'event loop interne.
- *
- * NOTE IMPL:
- * - memset / état propre
- * - init de la queue
- * - enregistrer callback + userdata
- * - ne démarre PAS encore le thread ici si tu veux séparer init/start
- */
-int wwmk_event_loop_init(WWMK_EventLoop *loop, size_t queue_capacity,
+/** @brief Initializes the event loop state before `wwmk_start()` publishes it. */
+int wwmk_event_loop_init(WWMK_EventLoop *loop,
                          WWMK_InternalEventCallback callback, void *userdata);
-
-/*
- * Détruit l'event loop interne.
- *
- * NOTE IMPL:
- * - appeler stop si nécessaire
- * - détruire la queue
- * - nettoyer tous les handles/hooks restants
- */
+/** @brief Tears down the internal loop and drains any remaining queue items. */
 void wwmk_event_loop_destroy(WWMK_EventLoop *loop);
-
-/*
- * Démarre la boucle.
- *
- * NOTE IMPL IMPORTANT:
- * - créer le thread worker
- * - installer les hooks / mécanismes Windows nécessaires
- * - marquer running = true seulement si tout a réussi
- * - éviter les doubles start()
- */
+/** @brief Starts the single worker thread that owns Win32 side effects. */
 int wwmk_event_loop_start(WWMK_EventLoop *loop);
-
-/*
- * Demande l'arrêt et attend la fin du thread.
- *
- * NOTE IMPL IMPORTANT:
- * - stop_requested = true
- * - push un event QUIT ou réveiller proprement le thread
- * - désinstaller les hooks Windows
- * - attendre Join/WaitForSingleObject(worker_thread, ...)
- * - fermer le handle du thread
- * - running = false en fin de parcours
- *
- * Très important :
- * stop() doit être idempotent ou au moins tolérant à un double appel.
- */
+/** @brief Stops the worker and closes the queue to reject late producers. */
 int wwmk_event_loop_stop(WWMK_EventLoop *loop);
-
-/*
- * Fonction du thread worker.
- *
- * NOTE IMPL:
- * - boucle principale interne
- * - récupère les événements source Windows
- * - les transforme en WWMK_InternalEvent
- * - les push dans la queue
- * - le consommateur unique peut être ce même thread, ou un second modèle
- *
- * Pour commencer simple, tu peux faire :
- *   thread unique = reçoit Windows + dispatch directement après normalisation
- * Mais si tu veux garder la vraie queue MPSC, ce point peut évoluer.
- */
+/** @brief Enqueues a public action for asynchronous execution. */
+int wwmk_event_loop_post_action(WWMK_EventLoop *loop, const WWMK_Action *action,
+                                WWMK_ActionCallback callback, void *userdata);
+/** @brief Enqueues an incoming pipe payload so it shares the same serialization path. */
+int wwmk_event_loop_post_pipe_message(WWMK_EventLoop *loop, const char *message,
+                                      size_t size);
+/** @brief Main worker entry point that serializes actions and pipe events. */
 DWORD WINAPI wwmk_event_loop_thread_main(LPVOID arg);
-
-/*
- * Transforme un événement interne en événement public.
- *
- * NOTE IMPL:
- * - mapping InternalEvent -> WWMK_Event
- * - ne pas exposer de détails internes
- */
+/** @brief Maps internal events to the public `WWMK_Event` shape. */
 int wwmk_event_loop_translate_event(const WWMK_InternalEvent *internal_event,
                                     WWMK_Event *public_event);
-
-/*
- * Dispatch final vers la callback publique utilisateur.
- *
- * NOTE IMPL:
- * - traduire d'abord l'événement interne
- * - ignorer proprement ceux qui ne doivent pas sortir publiquement
- * - appeler la callback enregistrée si elle existe
- */
+/** @brief Dispatches a translated event to the callback registered by `winwmkit.c`. */
 void wwmk_event_loop_dispatch(WWMK_EventLoop *loop,
                               const WWMK_InternalEvent *event);
+
+/** @brief Direct monitor enumeration used only by the worker implementation. */
+int wwmk_internal_get_monitors_direct(WWMK_Monitor *out, int cap);
+/** @brief Direct window enumeration used only by the worker implementation. */
+int wwmk_internal_get_windows_direct(WWMK_Window **out, int cap);
+/** @brief Direct `GetWindowRect` wrapper used behind queued actions. */
+int wwmk_internal_get_window_rect_direct(WWMK_Window window, WWMK_Rect *out);
+/** @brief Direct `MoveWindow` wrapper used behind queued actions. */
+int wwmk_internal_set_window_rect_direct(WWMK_Window window, WWMK_Rect rect);
+/** @brief Direct monitor lookup used behind queued actions. */
+WWMK_Monitor wwmk_internal_monitor_from_window_direct(WWMK_Window window);
+/** @brief Direct “largest overlap” monitor lookup used behind queued actions. */
+int wwmk_internal_window_primary_monitor_direct(WWMK_Window window,
+                                                WWMK_Monitor *out);
+/** @brief Direct center-point monitor lookup used behind queued actions. */
+int wwmk_internal_window_monitor_by_center_direct(WWMK_Window window,
+                                                  WWMK_Monitor *out);
 
 #ifdef __cplusplus
 }
