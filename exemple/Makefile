@@ -9,7 +9,7 @@ EXAMPLE_OBJ = $(BUILD_DIR)/main.obj
 EXAMPLE_EXE = $(BUILD_DIR)/winwmkit_example.exe
 STATIC_LIB = $(LIB_DIR)/winwmkit.lib
 EXAMPLE_SOURCES = main.c
-WIN32_LIBS = user32.lib
+WIN32_LIBS = user32.lib ole32.lib
 
 ifneq ($(strip $(SANITIZERS)),)
 SANITIZER_FLAGS = /fsanitize=address /Zi /Od
