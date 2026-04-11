@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  release:
+    types:
+      - created
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build, for example 1.2.3 or v1.2.3.
+        required: true
+        type: string
+      upload_assets:
+        description: Upload the generated zip files to the release for this tag.
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - x64
+          - x86
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Set up MSVC
+        uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: ${{ matrix.arch }}
+
+      - name: Build release libraries
+        run: python build.py build --no-sanitizers
+
+      - name: Package release zip
+        id: package
+        shell: pwsh
+        run: |
+          $archiveBase = "winwmkit-$($env:RELEASE_TAG)-msvc-${{ matrix.arch }}"
+          $stageDir = Join-Path $env:RUNNER_TEMP $archiveBase
+          $includeDir = Join-Path $stageDir "include"
+          $libDir = Join-Path $stageDir "lib"
+          $zipPath = Join-Path $env:RUNNER_TEMP "$archiveBase.zip"
+
+          Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+
+          New-Item -ItemType Directory -Path $includeDir | Out-Null
+          New-Item -ItemType Directory -Path $libDir | Out-Null
+
+          Copy-Item -Path "include\*" -Destination $includeDir -Recurse
+          Copy-Item -Path "build\lib\winwmkit.lib" -Destination $libDir
+          Copy-Item -Path "build\lib\winwmkit.dll" -Destination $libDir
+          Copy-Item -Path "build\lib\winwmkit_dll.lib" -Destination $libDir
+          Copy-Item -Path "LICENCE" -Destination $stageDir
+
+          Compress-Archive -Path $stageDir -DestinationPath $zipPath -Force
+
+          "zip_path=$zipPath" >> $env:GITHUB_OUTPUT
+
+      - name: Upload release assets
+        if: github.event_name == 'release' || github.event.inputs.upload_assets == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: ${{ steps.package.outputs.zip_path }}
+          fail_on_unmatched_files: true
+          overwrite_files: true
