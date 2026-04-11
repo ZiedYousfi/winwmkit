@@ -1,6 +1,5 @@
 #include "winwmkit/winwmkit.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <windows.h>
 
@@ -22,6 +21,12 @@ static WWMK_Point wwmk_todo_point(void) {
   wwmk_todo_abort();
   return value;
 }
+
+enum {
+  WWMK_GET_WINDOWS_INVALID_ARGUMENT = -1,
+  WWMK_GET_WINDOWS_OUT_OF_MEMORY = -2,
+  WWMK_GET_WINDOWS_ENUM_FAILED = -3
+};
 
 int wwmk_set_event_callback(WWMK_EventCallback callback, void *userdata) {
   (void)callback;
@@ -63,62 +68,83 @@ int wwmk_get_monitors(WWMK_Monitor *out, int cap) {
   return wwmk_todo_int();
 }
 
-struct EnumWindowsCallbackCtx {
-  HWND hwnd;
-};
-
 struct EnumWindowsCallbackLParam {
-  struct EnumWindowsCallbackCtx *ctxArray;
-  int iteration;
+  WWMK_Window *buffer;
+  int count;
   int cap;
-  int infinite;
+  int status;
 };
 
 static BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
   struct EnumWindowsCallbackLParam *ctx =
       (struct EnumWindowsCallbackLParam *)lParam;
+  WWMK_Window *grown = NULL;
+  WWMK_Window window = {0};
+  RECT rect = {0};
 
-  if (ctx->infinite) {
-    ctx->cap++;
+  if (ctx->count >= ctx->cap) {
+    int nextCapacity = ctx->cap > 0 ? ctx->cap * 2 : 16;
+    grown = realloc(ctx->buffer, sizeof(*grown) * (size_t)nextCapacity);
+    if (grown == NULL) {
+      ctx->status = WWMK_GET_WINDOWS_OUT_OF_MEMORY;
+      return FALSE;
+    }
+    ctx->buffer = grown;
+    ctx->cap = nextCapacity;
   }
 
-  if (ctx->iteration >= ctx->cap) {
-    return FALSE; // Stop enumeration if we've reached the capacity
+  window.hwnd = hwnd;
+  GetWindowTextA(hwnd, window.title, 256);
+  window.is_visible = IsWindowVisible(hwnd) ? 1 : 0;
+  window.is_minimized = IsIconic(hwnd) ? 1 : 0;
+  window.is_maximized = IsZoomed(hwnd) ? 1 : 0;
+
+  if (GetWindowRect(hwnd, &rect)) {
+    window.rect.x = rect.left;
+    window.rect.y = rect.top;
+    window.rect.width = rect.right - rect.left;
+    window.rect.height = rect.bottom - rect.top;
   }
 
-  struct EnumWindowsCallbackCtx windowCtx = {0};
-
-  windowCtx.hwnd = hwnd;
-  ctx->ctxArray[ctx->iteration] = windowCtx;
-  ctx->iteration++;
+  ctx->buffer[ctx->count] = window;
+  ctx->count++;
 
   return TRUE;
 }
 
-int wwmk_get_windows(WWMK_Window *out, int cap) {
-  (void)out;
+int wwmk_get_windows(WWMK_Window **out, int cap) {
   struct EnumWindowsCallbackLParam result = {0};
+  int initialCap = cap;
 
-  result.ctxArray = calloc(sizeof(struct EnumWindowsCallbackCtx), cap);
-  result.iteration = 0;
-  result.cap = cap;
-
-  if (cap <= 0) {
-    result.infinite = 1;
+  if (out == NULL || cap < 0) {
+    return WWMK_GET_WINDOWS_INVALID_ARGUMENT;
   }
 
-  if (!EnumWindows(EnumWindowsCallback, (LPARAM)&result) &&
-      result.iteration < result.cap) {
-    printf("EnumWindows failed with error code: %lu\n", GetLastError());
-    return 1;
+  *out = NULL;
+
+  if (initialCap == 0) {
+    initialCap = 16;
   }
 
-  for (int i = 0; i < result.iteration; i++) {
-    char title[256] = {0};
-    GetWindowTextA(result.ctxArray[i].hwnd, title, sizeof(title) - 1);
-    printf("Found window: %s\n", title);
+  result.buffer = malloc(sizeof(*result.buffer) * (size_t)initialCap);
+  if (result.buffer == NULL) {
+    return WWMK_GET_WINDOWS_OUT_OF_MEMORY;
   }
-  return 0;
+  result.count = 0;
+  result.cap = initialCap;
+  result.status = 0;
+
+  if (!EnumWindows(EnumWindowsCallback, (LPARAM)&result)) {
+    if (result.status < 0) {
+      free(result.buffer);
+      return result.status;
+    }
+    free(result.buffer);
+    return WWMK_GET_WINDOWS_ENUM_FAILED;
+  }
+
+  *out = result.buffer;
+  return result.count;
 }
 
 int wwmk_get_window_rect(WWMK_Window window, WWMK_Rect *out) {

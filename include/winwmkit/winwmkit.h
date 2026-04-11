@@ -39,7 +39,8 @@ typedef struct {
 } WWMK_Monitor;
 
 typedef struct {
-  uintptr_t id;
+  void *hwnd;
+  char title[256];
   WWMK_Rect rect;
   int is_visible;
   int is_minimized;
@@ -79,7 +80,10 @@ WWMK_API int wwmk_on_monitor_changed(WWMK_EventCallback callback,
                                      void *userdata);
 
 WWMK_API int wwmk_get_monitors(WWMK_Monitor *out, int cap);
-WWMK_API int wwmk_get_windows(WWMK_Window *out, int cap);
+/* Always allocates a new buffer and stores it in *out. Caller frees with
+ *
+ * free(). */
+WWMK_API int wwmk_get_windows(WWMK_Window **out, int cap);
 
 WWMK_API int wwmk_get_window_rect(WWMK_Window window, WWMK_Rect *out);
 WWMK_API int wwmk_set_window_rect(WWMK_Window window, WWMK_Rect rect);
