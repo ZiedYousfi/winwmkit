@@ -7,11 +7,11 @@
 #include "winwmkit/winwmkit.h"
 
 /*
- * Petit programme de démonstration :
- * - démarre la loop asynchrone de la lib
- * - charge la liste des fenêtres via une requête callback-based
- * - déplace une fenêtre avec l'API publique
- * - redimensionne la même fenêtre via une commande texte envoyée dans le pipe
+ * Small demonstration program:
+ * - starts the library's asynchronous loop
+ * - loads the window list through a callback-based request
+ * - moves one window through the public API
+ * - resizes the same window through a text command sent to the pipe
  */
 typedef struct {
   HANDLE done_event;
@@ -118,8 +118,8 @@ static int send_pipe_command(const char *pipe_name, const char *command) {
   return 1;
 }
 
-/* Montre la face "événement" du pipe : le message brut arrive ici avant ou en
- * parallèle de sa transformation éventuelle en action. */
+/* Shows the pipe event side: the raw message arrives here before, or alongside,
+ * its optional transformation into an action. */
 static void on_pipe_message(const WWMK_Event *event, void *userdata) {
   ExampleState *state = (ExampleState *)userdata;
 
@@ -131,8 +131,8 @@ static void on_pipe_message(const WWMK_Event *event, void *userdata) {
   printf("pipe event => \"%.*s\"\n", (int)event->message_size, event->message);
 }
 
-/* Montre la face "événement métier" : une action de move finie produit aussi
- * un événement de déplacement. */
+/* Shows the higher-level event side: a completed move action also emits a
+ * public window-moved event. */
 static void on_window_moved(const WWMK_Event *event, void *userdata) {
   (void)userdata;
 
@@ -207,10 +207,10 @@ static void on_default_action(const WWMK_ActionResult *result, void *userdata) {
 }
 
 /*
- * Cette callback reçoit la liste des fenêtres depuis la queue.
- * On s'en sert pour choisir une fenêtre "safe", puis on déclenche :
- * - une action directe via l'API publique
- * - une action équivalente via le pipe
+ * This callback receives the window list from the queue.
+ * It picks a "safe" window, then triggers:
+ * - one direct action through the public API
+ * - one equivalent action through the pipe
  */
 static void on_windows_loaded(const WWMK_ActionResult *result, void *userdata) {
   ExampleState *state = (ExampleState *)userdata;
@@ -244,7 +244,7 @@ static void on_windows_loaded(const WWMK_ActionResult *result, void *userdata) {
 
     state->saw_target_window = 1;
 
-    /* Action 1 : l'utilisateur appelle directement l'API publique. */
+    /* Action 1: the user calls the public API directly. */
     example_mark_action_started(state);
     enqueue_status = wwmk_move_window(*window, window->rect.x + 48,
                                       window->rect.y + 32);
@@ -258,9 +258,9 @@ static void on_windows_loaded(const WWMK_ActionResult *result, void *userdata) {
                                       : window->rect.width + 80,
              window->rect.height);
 
-    /* Action 2 : un autre processus pourrait envoyer cette commande dans le
-     * pipe. La lib reçoit alors le texte, émet l'événement pipe, puis le parse
-     * en `WWMK_Action_RESIZE_WINDOW`. */
+    /* Action 2: another process could send this command through the pipe.
+     * The library receives the text, emits the pipe event, then parses it into
+     * `WWMK_ACTION_RESIZE_WINDOW`. */
     example_mark_action_started(state);
     if (!send_pipe_command(state->pipe_name, pipe_command)) {
       printf("pipe write failed => %s\n", pipe_command);
@@ -294,21 +294,21 @@ int main(void) {
   printf("WinWMKit async example.\n");
   printf("It queues one direct move action and one pipe-driven resize action.\n");
 
-  /* Callback d'action par défaut :
-   * toutes les actions "fire and forget" de l'exemple y reviennent. */
+  /* Default action callback:
+   * all fire-and-forget actions in the example report here. */
   status = wwmk_set_action_callback(on_default_action, &state);
   printf("wwmk_set_action_callback(...) => %d\n", status);
 
-  /* Callback spécialisé pour voir le message brut qui arrive du pipe. */
+  /* Dedicated callback used to inspect the raw message coming from the pipe. */
   status = wwmk_on_pipe_message(on_pipe_message, &state);
   printf("wwmk_on_pipe_message(...) => %d\n", status);
 
-  /* Callback événementiel supplémentaire pour montrer qu'une action réussie
-   * peut aussi produire un événement public. */
+  /* Additional event callback that shows how a successful action can also emit
+   * a public event. */
   status = wwmk_on_window_moved(on_window_moved, &state);
   printf("wwmk_on_window_moved(...) => %d\n", status);
 
-  /* Démarre la loop et le pipe optionnel décrits dans `options`. */
+  /* Starts the loop and the optional pipe described in `options`. */
   status = wwmk_start(&options);
   printf("wwmk_start(&options) => %d\n", status);
   if (status != 0) {
@@ -316,8 +316,8 @@ int main(void) {
     return 1;
   }
 
-  /* Première vraie requête asynchrone :
-   * la réponse arrive dans `on_windows_loaded`. */
+  /* First real asynchronous request:
+   * the response arrives in `on_windows_loaded`. */
   status = wwmk_request_windows(on_windows_loaded, &state);
   printf("wwmk_request_windows(...) => %d\n", status);
   if (status != 0) {
