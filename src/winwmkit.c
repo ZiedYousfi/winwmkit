@@ -1,7 +1,17 @@
 #include "winwmkit/winwmkit.h"
 
+#include <ShObjIdl.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <windows.h>
+
+#define WWMK_ALIGNOF(type)                                                     \
+  offsetof(                                                                    \
+      struct {                                                                 \
+        char c;                                                                \
+        type value;                                                            \
+      },                                                                       \
+      value)
 
 static void wwmk_todo_abort(void) { abort(); }
 
@@ -70,27 +80,43 @@ int wwmk_get_monitors(WWMK_Monitor *out, int cap) {
 
 struct EnumWindowsCallbackLParam {
   WWMK_Window *buffer;
+  GUID *virtual_desktop_ids;
   int count;
   int cap;
   int status;
+  IVirtualDesktopManager *virtual_desktop_manager;
 };
 
 static BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
   struct EnumWindowsCallbackLParam *ctx =
       (struct EnumWindowsCallbackLParam *)lParam;
-  WWMK_Window *grown = NULL;
+  WWMK_Window *grown_windows = NULL;
+  GUID *grown_virtual_desktops = NULL;
   WWMK_Window window = {0};
   RECT rect = {0};
+  int next_capacity = 0;
 
   if (ctx->count >= ctx->cap) {
-    int nextCapacity = ctx->cap > 0 ? ctx->cap * 2 : 16;
-    grown = realloc(ctx->buffer, sizeof(*grown) * (size_t)nextCapacity);
-    if (grown == NULL) {
+    next_capacity = ctx->cap > 0 ? ctx->cap * 2 : 16;
+
+    grown_windows =
+        realloc(ctx->buffer, sizeof(*grown_windows) * (size_t)next_capacity);
+    if (grown_windows == NULL) {
       ctx->status = WWMK_GET_WINDOWS_OUT_OF_MEMORY;
       return FALSE;
     }
-    ctx->buffer = grown;
-    ctx->cap = nextCapacity;
+    ctx->buffer = grown_windows;
+
+    grown_virtual_desktops =
+        realloc(ctx->virtual_desktop_ids,
+                sizeof(*grown_virtual_desktops) * (size_t)next_capacity);
+    if (grown_virtual_desktops == NULL) {
+      ctx->status = WWMK_GET_WINDOWS_OUT_OF_MEMORY;
+      return FALSE;
+    }
+
+    ctx->virtual_desktop_ids = grown_virtual_desktops;
+    ctx->cap = next_capacity;
   }
 
   window.hwnd = hwnd;
@@ -98,12 +124,17 @@ static BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
   window.is_visible = IsWindowVisible(hwnd) ? 1 : 0;
   window.is_minimized = IsIconic(hwnd) ? 1 : 0;
   window.is_maximized = IsZoomed(hwnd) ? 1 : 0;
+  (void)rect;
+  (void)wwmk_get_window_rect(window, &window.rect);
 
-  if (GetWindowRect(hwnd, &rect)) {
-    window.rect.x = rect.left;
-    window.rect.y = rect.top;
-    window.rect.width = rect.right - rect.left;
-    window.rect.height = rect.bottom - rect.top;
+  if (ctx->virtual_desktop_manager != NULL) {
+    GUID desktop_id = {0};
+    HRESULT hr = ctx->virtual_desktop_manager->lpVtbl->GetWindowDesktopId(
+        ctx->virtual_desktop_manager, hwnd, &desktop_id);
+    if (SUCCEEDED(hr)) {
+      ctx->virtual_desktop_ids[ctx->count] = desktop_id;
+      window.has_virtual_desktop = 1;
+    }
   }
 
   ctx->buffer[ctx->count] = window;
@@ -114,7 +145,16 @@ static BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
 
 int wwmk_get_windows(WWMK_Window **out, int cap) {
   struct EnumWindowsCallbackLParam result = {0};
+  char *allocation = NULL;
+  WWMK_Window *windows = NULL;
+  GUID *virtual_desktops = NULL;
+  HRESULT com_hr = S_OK;
   int initialCap = cap;
+  int i = 0;
+  size_t windows_size = 0;
+  size_t virtual_desktops_offset = 0;
+  size_t virtual_desktops_size = 0;
+  size_t total_size = 0;
 
   if (out == NULL || cap < 0) {
     return WWMK_GET_WINDOWS_INVALID_ARGUMENT;
@@ -130,27 +170,107 @@ int wwmk_get_windows(WWMK_Window **out, int cap) {
   if (result.buffer == NULL) {
     return WWMK_GET_WINDOWS_OUT_OF_MEMORY;
   }
+  result.virtual_desktop_ids =
+      malloc(sizeof(*result.virtual_desktop_ids) * (size_t)initialCap);
+  if (result.virtual_desktop_ids == NULL) {
+    free(result.buffer);
+    return WWMK_GET_WINDOWS_OUT_OF_MEMORY;
+  }
   result.count = 0;
   result.cap = initialCap;
   result.status = 0;
+  result.virtual_desktop_manager = NULL;
+
+  com_hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+  if (com_hr == RPC_E_CHANGED_MODE) {
+    com_hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+  }
+  if (SUCCEEDED(com_hr) || com_hr == RPC_E_CHANGED_MODE) {
+    (void)CoCreateInstance(&CLSID_VirtualDesktopManager, NULL,
+                           CLSCTX_INPROC_SERVER, &IID_IVirtualDesktopManager,
+                           (void **)&result.virtual_desktop_manager);
+  }
 
   if (!EnumWindows(EnumWindowsCallback, (LPARAM)&result)) {
+    if (result.virtual_desktop_manager != NULL) {
+      result.virtual_desktop_manager->lpVtbl->Release(
+          result.virtual_desktop_manager);
+    }
+    if (com_hr == S_OK || com_hr == S_FALSE) {
+      CoUninitialize();
+    }
     if (result.status < 0) {
       free(result.buffer);
+      free(result.virtual_desktop_ids);
       return result.status;
     }
     free(result.buffer);
+    free(result.virtual_desktop_ids);
     return WWMK_GET_WINDOWS_ENUM_FAILED;
   }
 
-  *out = result.buffer;
+  if (result.virtual_desktop_manager != NULL) {
+    result.virtual_desktop_manager->lpVtbl->Release(
+        result.virtual_desktop_manager);
+  }
+  if (com_hr == S_OK || com_hr == S_FALSE) {
+    CoUninitialize();
+  }
+
+  if (result.count == 0) {
+    free(result.buffer);
+    free(result.virtual_desktop_ids);
+    return 0;
+  }
+
+  windows_size = sizeof(*windows) * (size_t)result.count;
+  virtual_desktops_offset =
+      (windows_size + WWMK_ALIGNOF(GUID) - 1u) & ~(WWMK_ALIGNOF(GUID) - 1u);
+  virtual_desktops_size = sizeof(*virtual_desktops) * (size_t)result.count;
+  total_size = virtual_desktops_offset + virtual_desktops_size;
+
+  allocation = malloc(total_size);
+  if (allocation == NULL) {
+    free(result.buffer);
+    free(result.virtual_desktop_ids);
+    return WWMK_GET_WINDOWS_OUT_OF_MEMORY;
+  }
+
+  windows = (WWMK_Window *)allocation;
+  virtual_desktops = (GUID *)(allocation + virtual_desktops_offset);
+
+  for (i = 0; i < result.count; i++) {
+    windows[i] = result.buffer[i];
+    if (windows[i].has_virtual_desktop) {
+      virtual_desktops[i] = result.virtual_desktop_ids[i];
+      windows[i].virtual_desktop = &virtual_desktops[i];
+    } else {
+      windows[i].virtual_desktop = NULL;
+    }
+  }
+
+  *out = windows;
+  free(result.buffer);
+  free(result.virtual_desktop_ids);
   return result.count;
 }
 
 int wwmk_get_window_rect(WWMK_Window window, WWMK_Rect *out) {
-  (void)window;
-  (void)out;
-  return wwmk_todo_int();
+  RECT rect = {0};
+
+  if (window.hwnd == NULL || out == NULL) {
+    return -1;
+  }
+
+  if (!GetWindowRect((HWND)window.hwnd, &rect)) {
+    return -1;
+  }
+
+  out->x = rect.left;
+  out->y = rect.top;
+  out->width = rect.right - rect.left;
+  out->height = rect.bottom - rect.top;
+  return 0;
 }
 
 int wwmk_set_window_rect(WWMK_Window window, WWMK_Rect rect) {
@@ -271,8 +391,15 @@ int wwmk_rect_is_visible_on_any_monitor(WWMK_Rect rect) {
 }
 
 int wwmk_get_virtual_space(WWMK_Rect *out) {
-  (void)out;
-  return wwmk_todo_int();
+  if (out == NULL) {
+    return -1;
+  }
+
+  out->x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+  out->y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+  out->width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+  out->height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+  return 0;
 }
 
 WWMK_Point wwmk_rect_center(WWMK_Rect rect) {

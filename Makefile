@@ -20,7 +20,7 @@ DLLFLAGS = /DWWMK_BUILD_DLL /LD
 STATIC_LIB = $(LIB_BUILD_DIR)/winwmkit.lib
 SHARED_DLL = $(LIB_BUILD_DIR)/winwmkit.dll
 IMPORT_LIB = $(LIB_BUILD_DIR)/winwmkit_dll.lib
-WIN32_LIBS = user32.lib kernel32.lib
+WIN32_LIBS = user32.lib kernel32.lib ole32.lib
 
 LIB_SOURCES = $(wildcard $(SRC_DIR)/*.c)
 LIB_OBJECTS = $(patsubst $(SRC_DIR)/%.c,$(LIB_BUILD_DIR)/%.obj,$(LIB_SOURCES))

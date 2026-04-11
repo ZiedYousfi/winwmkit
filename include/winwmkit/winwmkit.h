@@ -45,7 +45,9 @@ typedef struct {
   int is_visible;
   int is_minimized;
   int is_maximized;
-  uint64_t virtual_desktop;
+  /* Points to GUID storage owned by the buffer returned by wwmk_get_windows. */
+  void *virtual_desktop;
+  int has_virtual_desktop;
 } WWMK_Window;
 
 typedef enum {
@@ -80,9 +82,9 @@ WWMK_API int wwmk_on_monitor_changed(WWMK_EventCallback callback,
                                      void *userdata);
 
 WWMK_API int wwmk_get_monitors(WWMK_Monitor *out, int cap);
-/* Always allocates a new buffer and stores it in *out. Caller frees with
- *
- * free(). */
+/* Always allocates a new buffer and stores it in *out. Caller frees only *out
+ * with free(). Any WWMK_Window.virtual_desktop pointer returned for an entry is
+ * owned by that same allocation and must not be freed separately. */
 WWMK_API int wwmk_get_windows(WWMK_Window **out, int cap);
 
 WWMK_API int wwmk_get_window_rect(WWMK_Window window, WWMK_Rect *out);
