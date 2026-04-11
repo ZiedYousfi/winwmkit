@@ -18,8 +18,17 @@ In practice, it is the kind of library you use to make a window manager, not a w
 
 See [`exemple/`](./exemple/) for the current example program using the public API.
 
-## Status
+## Build
 
-There is no official build/distribution story in the project yet, and for the time being we do not present it as something "ready to build" from the README.
+Run them from a Developer PowerShell or a Visual Studio command prompt so `cl.exe` and `lib.exe` are available.
 
-That said, it is straightforward to build yourself if you want to work with it now.
+```powershell
+python build.py
+python build.py static
+python build.py shared --no-sanitizers
+python exemple/build.py
+python build.py compdb
+python build.py clean
+```
+
+The default configuration enables the address sanitizer. Pass `--no-sanitizers` to build without it, or `--sanitizers <name>` to pick a different MSVC sanitizer mode.
