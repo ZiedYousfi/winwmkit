@@ -8,6 +8,7 @@
 #define WWMK_API
 #endif
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -110,6 +111,13 @@ typedef struct {
 /** @brief Callback signature for event notifications. */
 typedef void (*WWMK_EventCallback)(const WWMK_Event *event, void *userdata);
 
+/** @brief Opaque named-pipe server handle. */
+typedef struct WWMK_PipeServer WWMK_PipeServer;
+
+/** @brief Callback signature for incoming pipe messages. */
+typedef void (*WWMK_PipeMessageCallback)(const char *message, size_t size,
+                                         void *userdata);
+
 /**
  * @brief Registers a generic event callback.
  * @param callback Callback invoked for emitted events.
@@ -172,6 +180,25 @@ WWMK_API int wwmk_on_window_moved(WWMK_EventCallback callback, void *userdata);
  */
 WWMK_API int wwmk_on_monitor_changed(WWMK_EventCallback callback,
                                      void *userdata);
+
+/**
+ * @brief Starts a background named-pipe server.
+ * @param pipe_name Pipe name such as `my-pipe` or `\\.\pipe\my-pipe`.
+ * @param callback Callback invoked for each complete message received.
+ * @param userdata Opaque user pointer passed back to @p callback.
+ * @return Server handle on success, or `NULL` on failure.
+ * @note Release the returned handle with `wwmk_pipe_server_stop`.
+ */
+WWMK_API WWMK_PipeServer *
+wwmk_pipe_server_start(const char *pipe_name,
+                       WWMK_PipeMessageCallback callback, void *userdata);
+
+/**
+ * @brief Stops a named-pipe server created by `wwmk_pipe_server_start`.
+ * @param server Server handle to stop.
+ * @return `0` on success, or a negative error code.
+ */
+WWMK_API int wwmk_pipe_server_stop(WWMK_PipeServer *server);
 
 /**
  * @brief Enumerates connected monitors.
