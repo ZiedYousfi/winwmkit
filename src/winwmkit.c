@@ -914,8 +914,9 @@ int wwmk_internal_get_focused_window_direct(WWMK_Window *out) {
   window.is_minimized = IsIconic(hwnd) ? 1 : 0;
   window.is_maximized = IsZoomed(hwnd) ? 1 : 0;
 
-  if (wwmk_internal_get_window_rect_direct(window, &window.rect) < 0) {
-    window.rect = (WWMK_Rect){0};
+  int rect_status = wwmk_internal_get_window_rect_direct(window, &window.rect);
+  if (rect_status < 0) {
+    return rect_status;
   }
 
   *out = window;
