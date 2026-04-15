@@ -7,6 +7,7 @@ It is not meant to be a framework. It does not try to define your architecture, 
 From the public API, that means:
 
 - top-level window enumeration
+- focused-window lookup
 - monitor enumeration
 - window geometry and monitor geometry helpers
 - move, resize, and set-rect operations for windows
