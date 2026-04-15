@@ -233,6 +233,12 @@ static int wwmk_try_parse_pipe_action(char *message, WWMK_Action *out) {
     return 1;
   }
 
+  if (strcmp(token, "focused_window") == 0 ||
+      strcmp(token, "get_focused_window") == 0) {
+    out->type = WWMK_ACTION_GET_FOCUSED_WINDOW;
+    return 1;
+  }
+
   if (strcmp(token, "move") == 0) {
     char *hwnd_token = strtok_s(NULL, " \t\r\n", &context);
     char *x_token = strtok_s(NULL, " \t\r\n", &context);
@@ -638,6 +644,13 @@ int wwmk_request_monitors(WWMK_ActionCallback callback, void *userdata) {
   return wwmk_post_action(&action, callback, userdata);
 }
 
+int wwmk_request_focused_window(WWMK_ActionCallback callback, void *userdata) {
+  WWMK_Action action = {0};
+
+  action.type = WWMK_ACTION_GET_FOCUSED_WINDOW;
+  return wwmk_post_action(&action, callback, userdata);
+}
+
 int wwmk_request_window_rect(WWMK_Window window, WWMK_ActionCallback callback,
                              void *userdata) {
   WWMK_Action action = {0};
@@ -880,6 +893,36 @@ int wwmk_internal_get_windows_direct(WWMK_Window **out, int cap) {
   return result.count;
 }
 
+int wwmk_internal_get_focused_window_direct(WWMK_Window *out) {
+  HWND hwnd = NULL;
+  WWMK_Window window = {0};
+
+  if (out == NULL) {
+    return WWMK_STATUS_INVALID_ARGUMENT;
+  }
+
+  *out = (WWMK_Window){0};
+
+  hwnd = GetForegroundWindow();
+  if (hwnd == NULL) {
+    return WWMK_STATUS_NOT_FOUND;
+  }
+
+  window.hwnd = hwnd;
+  GetWindowTextA(hwnd, window.title, 256);
+  window.is_visible = IsWindowVisible(hwnd) ? 1 : 0;
+  window.is_minimized = IsIconic(hwnd) ? 1 : 0;
+  window.is_maximized = IsZoomed(hwnd) ? 1 : 0;
+
+  int rect_status = wwmk_internal_get_window_rect_direct(window, &window.rect);
+  if (rect_status < 0) {
+    return rect_status;
+  }
+
+  *out = window;
+  return 0;
+}
+
 int wwmk_internal_get_window_rect_direct(WWMK_Window window, WWMK_Rect *out) {
   RECT rect = {0};
 
@@ -1028,6 +1071,10 @@ int wwmk_get_monitors(WWMK_Monitor *out, int cap) {
 
 int wwmk_get_windows(WWMK_Window **out, int cap) {
   return wwmk_internal_get_windows_direct(out, cap);
+}
+
+int wwmk_get_focused_window(WWMK_Window *out) {
+  return wwmk_internal_get_focused_window_direct(out);
 }
 
 int wwmk_get_window_rect(WWMK_Window window, WWMK_Rect *out) {

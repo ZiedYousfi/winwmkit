@@ -124,6 +124,8 @@ void wwmk_event_loop_dispatch(WWMK_EventLoop *loop,
 int wwmk_internal_get_monitors_direct(WWMK_Monitor *out, int cap);
 /** @brief Direct window enumeration used only by the worker implementation. */
 int wwmk_internal_get_windows_direct(WWMK_Window **out, int cap);
+/** @brief Direct focused-window lookup used behind queued actions. */
+int wwmk_internal_get_focused_window_direct(WWMK_Window *out);
 /** @brief Direct `GetWindowRect` wrapper used behind queued actions. */
 int wwmk_internal_get_window_rect_direct(WWMK_Window window, WWMK_Rect *out);
 /** @brief Direct `MoveWindow` wrapper used behind queued actions. */
