@@ -350,6 +350,14 @@ static int wwmk_action_process_get_focused_window(WWMK_ActionResult *result) {
   return result->status;
 }
 
+/** @brief Executes the queued focused-window mutation on the worker thread. */
+static int wwmk_action_process_set_focused_window(const WWMK_Action *action,
+                                                  WWMK_ActionResult *result) {
+  result->status = wwmk_internal_set_focused_window_direct(
+      action->data.set_focused_window.window);
+  return result->status;
+}
+
 /** @brief Executes a queued rectangle read and writes the answer into the action result. */
 static int wwmk_action_process_get_window_rect(const WWMK_Action *action,
                                                WWMK_ActionResult *result) {
@@ -444,6 +452,9 @@ static void wwmk_event_loop_process_action(WWMK_EventLoop *loop,
     break;
   case WWMK_ACTION_GET_FOCUSED_WINDOW:
     status = wwmk_action_process_get_focused_window(&result);
+    break;
+  case WWMK_ACTION_SET_FOCUSED_WINDOW:
+    status = wwmk_action_process_set_focused_window(&item->action, &result);
     break;
   case WWMK_ACTION_GET_WINDOW_RECT:
     status = wwmk_action_process_get_window_rect(&item->action, &result);

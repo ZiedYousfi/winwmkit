@@ -239,6 +239,19 @@ static int wwmk_try_parse_pipe_action(char *message, WWMK_Action *out) {
     return 1;
   }
 
+  if (strcmp(token, "set_focused_window") == 0 ||
+      strcmp(token, "focus_window") == 0) {
+    char *hwnd_token = strtok_s(NULL, " \t\r\n", &context);
+
+    if (!wwmk_parse_window_handle_token(hwnd_token, &window)) {
+      return 0;
+    }
+
+    out->type = WWMK_ACTION_SET_FOCUSED_WINDOW;
+    out->data.set_focused_window.window = window;
+    return 1;
+  }
+
   if (strcmp(token, "move") == 0) {
     char *hwnd_token = strtok_s(NULL, " \t\r\n", &context);
     char *x_token = strtok_s(NULL, " \t\r\n", &context);
@@ -923,6 +936,62 @@ int wwmk_internal_get_focused_window_direct(WWMK_Window *out) {
   return 0;
 }
 
+int wwmk_internal_set_focused_window_direct(WWMK_Window window) {
+  HWND hwnd = (HWND)window.hwnd;
+  HWND current_foreground = NULL;
+  DWORD current_thread_id = 0;
+  DWORD foreground_thread_id = 0;
+  DWORD target_thread_id = 0;
+  BOOL attached_foreground = FALSE;
+  BOOL attached_target = FALSE;
+  BOOL focused = FALSE;
+
+  if (hwnd == NULL || !IsWindow(hwnd)) {
+    return WWMK_STATUS_INVALID_ARGUMENT;
+  }
+
+  if (IsIconic(hwnd)) {
+    ShowWindow(hwnd, SW_RESTORE);
+  }
+
+  current_foreground = GetForegroundWindow();
+  if (current_foreground == hwnd) {
+    return 0;
+  }
+
+  current_thread_id = GetCurrentThreadId();
+  if (current_foreground != NULL) {
+    foreground_thread_id = GetWindowThreadProcessId(current_foreground, NULL);
+  }
+  target_thread_id = GetWindowThreadProcessId(hwnd, NULL);
+
+  if (foreground_thread_id != 0 && foreground_thread_id != current_thread_id) {
+    attached_foreground =
+        AttachThreadInput(current_thread_id, foreground_thread_id, TRUE);
+  }
+  if (target_thread_id != 0 && target_thread_id != current_thread_id &&
+      target_thread_id != foreground_thread_id) {
+    attached_target = AttachThreadInput(current_thread_id, target_thread_id, TRUE);
+  }
+
+  focused = BringWindowToTop(hwnd) && SetForegroundWindow(hwnd);
+  if (!focused) {
+    focused = SetActiveWindow(hwnd) != NULL;
+  }
+  if (!focused) {
+    focused = SetFocus(hwnd) != NULL;
+  }
+
+  if (attached_target) {
+    (void)AttachThreadInput(current_thread_id, target_thread_id, FALSE);
+  }
+  if (attached_foreground) {
+    (void)AttachThreadInput(current_thread_id, foreground_thread_id, FALSE);
+  }
+
+  return focused ? 0 : WWMK_STATUS_NOT_FOUND;
+}
+
 int wwmk_internal_get_window_rect_direct(WWMK_Window window, WWMK_Rect *out) {
   RECT rect = {0};
 
@@ -1075,6 +1144,14 @@ int wwmk_get_windows(WWMK_Window **out, int cap) {
 
 int wwmk_get_focused_window(WWMK_Window *out) {
   return wwmk_internal_get_focused_window_direct(out);
+}
+
+int wwmk_set_focused_window(WWMK_Window window) {
+  WWMK_Action action = {0};
+
+  action.type = WWMK_ACTION_SET_FOCUSED_WINDOW;
+  action.data.set_focused_window.window = window;
+  return wwmk_submit_simple_action(&action);
 }
 
 int wwmk_get_window_rect(WWMK_Window window, WWMK_Rect *out) {

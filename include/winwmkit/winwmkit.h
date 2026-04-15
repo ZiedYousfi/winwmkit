@@ -147,7 +147,9 @@ typedef enum {
   /** Resolve the monitor containing the window center. */
   WWMK_ACTION_WINDOW_MONITOR_BY_CENTER,
   /** Read the current focused window. */
-  WWMK_ACTION_GET_FOCUSED_WINDOW
+  WWMK_ACTION_GET_FOCUSED_WINDOW,
+  /** Set the current focused window. */
+  WWMK_ACTION_SET_FOCUSED_WINDOW
 } WWMK_ActionType;
 
 /** @brief Action payload submitted to the event loop. */
@@ -200,6 +202,11 @@ typedef struct {
       /** Target window. */
       WWMK_Window window;
     } window_monitor_by_center;
+    /** Payload for `WWMK_ACTION_SET_FOCUSED_WINDOW`. */
+    struct {
+      /** Target window. */
+      WWMK_Window window;
+    } set_focused_window;
   } data;
 } WWMK_Action;
 
@@ -459,6 +466,14 @@ WWMK_API int wwmk_get_windows(WWMK_Window **out, int cap);
  * @note The returned window snapshot leaves `virtual_desktop` unset.
  */
 WWMK_API int wwmk_get_focused_window(WWMK_Window *out);
+
+/**
+ * @brief Requests focus for a window.
+ * @param window Window snapshot or handle wrapper.
+ * @return `0` when the action was queued, or a negative error code.
+ * @note The actual Windows call happens asynchronously on the event loop.
+ */
+WWMK_API int wwmk_set_focused_window(WWMK_Window window);
 
 /**
  * @brief Reads the current bounds of a window.

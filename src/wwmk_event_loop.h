@@ -126,6 +126,8 @@ int wwmk_internal_get_monitors_direct(WWMK_Monitor *out, int cap);
 int wwmk_internal_get_windows_direct(WWMK_Window **out, int cap);
 /** @brief Direct focused-window lookup used behind queued actions. */
 int wwmk_internal_get_focused_window_direct(WWMK_Window *out);
+/** @brief Direct focused-window mutation used behind queued actions. */
+int wwmk_internal_set_focused_window_direct(WWMK_Window window);
 /** @brief Direct `GetWindowRect` wrapper used behind queued actions. */
 int wwmk_internal_get_window_rect_direct(WWMK_Window window, WWMK_Rect *out);
 /** @brief Direct `MoveWindow` wrapper used behind queued actions. */
