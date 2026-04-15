@@ -145,7 +145,9 @@ typedef enum {
   /** Resolve the primary monitor for a window. */
   WWMK_ACTION_WINDOW_PRIMARY_MONITOR,
   /** Resolve the monitor containing the window center. */
-  WWMK_ACTION_WINDOW_MONITOR_BY_CENTER
+  WWMK_ACTION_WINDOW_MONITOR_BY_CENTER,
+  /** Read the current focused window. */
+  WWMK_ACTION_GET_FOCUSED_WINDOW
 } WWMK_ActionType;
 
 /** @brief Action payload submitted to the event loop. */
@@ -222,6 +224,11 @@ typedef struct {
       /** Number of entries in @p items. */
       int count;
     } monitors;
+    /** Result payload for `WWMK_ACTION_GET_FOCUSED_WINDOW`. */
+    struct {
+      /** Focused window returned by the action. */
+      WWMK_Window window;
+    } focused_window;
     /** Result payload for rectangle-returning actions. */
     struct {
       /** Rectangle returned by the action. */
@@ -339,6 +346,16 @@ WWMK_API int wwmk_request_monitors(WWMK_ActionCallback callback,
                                    void *userdata);
 
 /**
+ * @brief Requests the current focused window through the event loop.
+ * @param callback Callback invoked when the action completes.
+ * @param userdata Opaque user pointer passed back to @p callback.
+ * @return `0` on success, or a negative error code.
+ * @note The returned window snapshot leaves `virtual_desktop` unset.
+ */
+WWMK_API int wwmk_request_focused_window(WWMK_ActionCallback callback,
+                                         void *userdata);
+
+/**
  * @brief Requests an asynchronous window-rectangle read through the event loop.
  * @param window Target window.
  * @param callback Callback invoked when the action completes.
@@ -434,6 +451,14 @@ WWMK_API int wwmk_get_monitors(WWMK_Monitor *out, int cap);
  * returned window array and becomes invalid after `free(*out)`.
  */
 WWMK_API int wwmk_get_windows(WWMK_Window **out, int cap);
+
+/**
+ * @brief Reads the current focused window.
+ * @param[out] out Receives the focused window snapshot.
+ * @return `0` on success, or a negative error code.
+ * @note The returned window snapshot leaves `virtual_desktop` unset.
+ */
+WWMK_API int wwmk_get_focused_window(WWMK_Window *out);
 
 /**
  * @brief Reads the current bounds of a window.
